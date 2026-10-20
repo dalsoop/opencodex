@@ -19,6 +19,8 @@ concurrency:
 
 jobs:
   build:
+    # Our independent repository does not publish the inherited site's configuration.
+    if: vars.OCX_ENABLE_DOCS_DEPLOY == '1'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:

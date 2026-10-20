@@ -29,3 +29,5 @@ the managed launcher routes `ocx update` exclusively to this installer.
 Personal repository CI runs the full Bun suite, typecheck, structure/privacy
 checks and documentation build. It publishes no packages and uses no secrets.
 The inherited cross-platform workflows remain available separately.
+Inherited Pages deployment stays off unless the repository owner explicitly sets
+`OCX_ENABLE_DOCS_DEPLOY=1` after configuring their own site.
