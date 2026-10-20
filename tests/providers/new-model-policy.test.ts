@@ -57,16 +57,32 @@ describe("new-model policy", () => {
     expect(config.disabledModels).toEqual([]);
   });
 
-  test("a legacy baseline without a default preserves visible models and hides only new arrivals", () => {
+  test("a legacy baseline without a default preserves choices across later default edits", () => {
     const ids = Array.from({ length: 600 }, (_, i) => `model-${i}`);
     const config = { port: 10100, defaultProvider: "vendor", providers: { vendor: {} },
       modelDiscovery: { knownModels: { vendor: { ids, removed: [], updatedAt: now } } },
     } as Parameters<typeof reconcileSuccessfulModelDiscoveries>[0]["config"];
-    reconcileSuccessfulModelDiscoveries({ config,
-      models: [...ids, "new"].map(id => ({ provider: "vendor", id })), authoritativeProviders: ["vendor"], now });
+    const models = ids.map(id => ({ provider: "vendor", id }));
+    reconcileSuccessfulModelDiscoveries({ config, models, authoritativeProviders: ["vendor"], now });
+    expect(config.disabledModels ?? []).toEqual([]);
+    expect(config.modelDiscovery!.knownModels!.vendor.visibilityInitialized).toBe(true);
+    config.providers.vendor!.defaultModel = "model-3";
+    expect(reconcileSuccessfulModelDiscoveries({ config, models, authoritativeProviders: ["vendor"], now })).toBe(false);
+    expect(config.disabledModels ?? []).toEqual([]);
+    reconcileSuccessfulModelDiscoveries({ config, models: [...models, { provider: "vendor", id: "new" }], authoritativeProviders: ["vendor"], now });
     expect(config.disabledModels).toEqual(["vendor/new"]);
-    expect(reconcileSuccessfulModelDiscoveries({ config,
-      models: [...ids, "new"].map(id => ({ provider: "vendor", id })), authoritativeProviders: ["vendor"], now })).toBe(false);
+  });
+
+  test("a preserved short baseline can grow past the threshold without hiding old models", () => {
+    const models = Array.from({ length: 21 }, (_, i) => ({ provider: "vendor", id: `model-${i}` }));
+    const config = { port: 10100, defaultProvider: "vendor", providers: { vendor: { defaultModel: "model-3" } },
+      modelDiscovery: { knownModels: { vendor: { ids: models.slice(0, 19).map(row => row.id), removed: [], updatedAt: now } } },
+    } as Parameters<typeof reconcileSuccessfulModelDiscoveries>[0]["config"];
+    reconcileSuccessfulModelDiscoveries({ config, models: models.slice(0, 19), authoritativeProviders: ["vendor"], now });
+    expect(config.disabledModels ?? []).toEqual([]);
+    expect(config.modelDiscovery!.knownModels!.vendor.visibilityInitialized).toBe(true);
+    reconcileSuccessfulModelDiscoveries({ config, models, authoritativeProviders: ["vendor"], now });
+    expect(config.disabledModels).toEqual(["vendor/model-19", "vendor/model-20"]);
   });
 
   test("bootstraps without hiding the existing catalog", () => {
@@ -125,7 +141,7 @@ describe("new-model policy", () => {
       port: 10100, defaultProvider: "vendor", providers: { vendor: {} },
       modelDiscovery: {
         newModelPolicy: "off" as const,
-        knownModels: { vendor: { ids: ["a", "b"], removed: [], updatedAt: "2026-01-01T00:00:00Z" } },
+        knownModels: { vendor: { ids: ["a", "b"], removed: [], updatedAt: "2026-01-01T00:00:00Z", visibilityInitialized: true } },
       },
     };
     const changed = reconcileSuccessfulModelDiscoveries({
@@ -214,7 +230,7 @@ describe("new-model policy", () => {
     test("repeated read-side reconciliation of the same roster never shrinks the baseline or reports a change", () => {
       const config = {
         port: 10100, defaultProvider: "vendor", providers: { vendor: {} },
-        modelDiscovery: { newModelPolicy: "off" as const, knownModels: { vendor: structuredClone(seedBaseline) } },
+        modelDiscovery: { newModelPolicy: "off" as const, knownModels: { vendor: { ...structuredClone(seedBaseline), visibilityInitialized: true } } },
       } as Parameters<typeof reconcileSuccessfulModelDiscoveries>[0]["config"];
       for (let poll = 0; poll < MODEL_REMOVAL_GRACE_FETCHES * 3; poll++) {
         const changed = reconcileSuccessfulModelDiscoveries({
