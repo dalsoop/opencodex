@@ -10,7 +10,7 @@
  * `scripts/ci/release-preflight.sh` against a real tag set with fake `gh` and `npm`.
  */
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
@@ -125,6 +125,9 @@ function preflight(scenario: Scenario): { status: number | null; output: string;
     const bin = join(directory, "bin");
     mkdirSync(repo);
     mkdirSync(bin);
+    // Other isolated workers can alter ambient PATH. Run the real preflight with this Bun,
+    // never a temporary fake package's relocated executable (whose dylibs may be absent).
+    symlinkSync(process.execPath, join(bin, "bun"));
     writeFileSync(join(bin, "gh"), FAKE_GH, { mode: 0o755 });
     writeFileSync(join(bin, "npm"), FAKE_NPM, { mode: 0o755 });
     const gitEnv = {
