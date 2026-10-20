@@ -193,7 +193,7 @@ export function reconcileSuccessfulModelDiscoveries(options: {
       hasSelectedModels: (configured.selectedModels?.length ?? 0) > 0,
       // A previous per-model switch edit is an explicit choice too. Never reinitialize it.
       initiallyVisibleIds: baseline?.visibilityInitialized
-        || (baseline && discoveredIds.length < INITIAL_MODEL_SELECTION_THRESHOLD)
+        || (baseline && baseline.ids.length < INITIAL_MODEL_SELECTION_THRESHOLD)
         || (baseline && !defaultModel)
         || (configured.modelPreset?.mode === "all" && !configured.modelPreset.fallback)
         || options.config.disabledModels?.some(selector => discoveredIds.some(id => slugEquals(selector, provider, id)))
