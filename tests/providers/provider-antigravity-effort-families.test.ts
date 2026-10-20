@@ -20,7 +20,7 @@ function configFor(ids = tiers): OcxConfig {
     port: 10100, defaultProvider: provider, providers: { [provider]: {} },
     modelDiscovery: {
       newModelPolicy: "off",
-      knownModels: { [provider]: { ids: [...ids], removed: [], updatedAt: now } },
+      knownModels: { [provider]: { ids: [...ids], removed: [], updatedAt: now, visibilityInitialized: true } },
     },
   };
 }
@@ -162,7 +162,7 @@ describe("Antigravity effort family reconciliation", () => {
     config.modelDiscovery!.knownModels![provider]!.removed = [tiers[1]!];
     config.modelDiscovery!.knownModels![provider]!.missing = { [tiers[0]!]: 2, [tiers[2]!]: 1 };
     expect(reconcile(config)).toBe(true);
-    expect(config.modelDiscovery!.knownModels![provider]).toEqual({ ids: [base], removed: [base], updatedAt: now });
+    expect(config.modelDiscovery!.knownModels![provider]).toEqual({ ids: [base], removed: [base], updatedAt: now, visibilityInitialized: true });
     expect(config.modelDiscovery!.recentArrivals).toBeUndefined();
     expect(reconcile(config)).toBe(false);
   });
@@ -234,7 +234,7 @@ test("overlapping complete family bases remain public and are not policy aliases
     antigravityEffortWireModelIds: { low: `${id}-low`, medium: `${id}-medium`, high: `${id}-high` } }));
   expect(collapseAntigravityPublicModels(rows).map(row => row.id)).toEqual(["foo", "foo-low"]);
   const config: OcxConfig = { port: 0, defaultProvider: provider, providers: { [provider]: {} },
-    modelDiscovery: { knownModels: { [provider]: { ids: ["foo", "foo-low"], removed: [], updatedAt: now } } } };
+    modelDiscovery: { knownModels: { [provider]: { ids: ["foo", "foo-low"], removed: [], updatedAt: now, visibilityInitialized: true } } } };
   expect(reconcileSuccessfulModelDiscoveries({ config, models: rows, authoritativeProviders: [provider], now })).toBe(false);
   expect(config.modelDiscovery!.knownModels![provider]!.ids).toEqual(["foo", "foo-low"]);
 });
