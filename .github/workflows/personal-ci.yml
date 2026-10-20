@@ -17,6 +17,10 @@ jobs:
     if: github.repository == 'dalsoop/opencodex'
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
@@ -32,7 +36,11 @@ jobs:
       - run: bun run structure:check
       - run: bun run privacy:scan
       - run: bun run build:gui
-      - run: bun run test --retry=1
+      - name: Full suite in isolated batches
+        env:
+          TEST_SHARD: ${{ matrix.shard }}/4
+          BUN_TEST_FILE_SCOPE: all
+        run: bash scripts/ci/run-bun-test-batches.sh "$TEST_SHARD"
   docs:
     if: github.repository == 'dalsoop/opencodex'
     runs-on: ubuntu-latest

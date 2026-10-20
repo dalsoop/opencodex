@@ -10,9 +10,10 @@
  * `scripts/ci/release-preflight.sh` against a real tag set with fake `gh` and `npm`.
  */
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { delimiter, join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
+import { VERSION_SOURCE_PATHS, writeVersionSources } from "../../scripts/release-version-sources";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 import { repoPath } from "../helpers/repo-root";
 import { SPAWN_BUDGET_MS } from "../helpers/test-budget";
@@ -24,7 +25,6 @@ type Workflow = { concurrency?: { group?: string; "cancel-in-progress"?: boolean
 const release = Bun.YAML.parse(readFileSync(repoPath(".github", "workflows", "release.yml"), "utf8")) as Workflow;
 const needsOf = (job: Job | undefined): string[] =>
   job?.needs === undefined ? [] : typeof job.needs === "string" ? [job.needs] : job.needs;
-const PREFLIGHT = repoPath("scripts", "ci", "release-preflight.sh");
 
 describe("the release preflight job", () => {
   const preflight = release.jobs?.preflight;
@@ -85,14 +85,13 @@ type Scenario = {
   resume?: boolean;
 };
 
-// The script checks the real version sources (package.json and the desktop manifests) through its own
-// repository root, so the scenarios release the checkout's own version; only the tag set, dev, gh
-// and npm are fixtures.
-const OWN_VERSION = (JSON.parse(readFileSync(repoPath("package.json"), "utf8")) as { version: string }).version;
-const [MAJOR, MINOR] = OWN_VERSION.split(/[.-]/).map(Number) as [number, number];
-const OWN_IS_PREVIEW = OWN_VERSION.includes("-preview.");
-const OWN_REF = OWN_IS_PREVIEW ? "refs/heads/preview" : "refs/heads/main";
-const OWN_TAG = OWN_IS_PREVIEW ? "preview" : "latest";
+// Execute the real preflight and version-source checks in a complete fixture tree.
+// A checkout may itself be a personal prerelease; stable-release examples must remain stable.
+const FIXTURE_VERSION = "2.89.1";
+const [MAJOR, MINOR] = FIXTURE_VERSION.split(/[.-]/).map(Number) as [number, number];
+const FIXTURE_IS_PREVIEW = FIXTURE_VERSION.includes("-preview.");
+const FIXTURE_REF = FIXTURE_IS_PREVIEW ? "refs/heads/preview" : "refs/heads/main";
+const FIXTURE_TAG = FIXTURE_IS_PREVIEW ? "preview" : "latest";
 const NEXT_CORE = `${MAJOR}.${MINOR + 1}.0`;
 
 const FAKE_GH = [
@@ -125,6 +124,12 @@ function preflight(scenario: Scenario): { status: number | null; output: string;
     const bin = join(directory, "bin");
     mkdirSync(repo);
     mkdirSync(bin);
+    for (const relative of [...VERSION_SOURCE_PATHS, "scripts/ci/release-preflight.sh", "scripts/release-version-sources.ts", "scripts/version-line.ts"]) {
+      const target = join(repo, relative);
+      mkdirSync(dirname(target), { recursive: true });
+      copyFileSync(repoPath(relative), target);
+    }
+    writeVersionSources(repo, scenario.version ?? FIXTURE_VERSION);
     // Other isolated workers can alter ambient PATH. Run the real preflight with this Bun,
     // never a temporary fake package's relocated executable (whose dylibs may be absent).
     symlinkSync(process.execPath, join(bin, "bun"));
@@ -140,7 +145,6 @@ function preflight(scenario: Scenario): { status: number | null; output: string;
       GIT_COMMITTER_EMAIL: "fixture@example.test",
     };
     run(repo, gitEnv, "git", "init", "-q", "-b", "release");
-    writeFileSync(join(repo, "package.json"), JSON.stringify({ version: scenario.version ?? OWN_VERSION }));
     run(repo, gitEnv, "git", "add", "package.json");
     run(repo, gitEnv, "git", "commit", "-q", "-m", "release");
     const head = run(repo, gitEnv, "git", "rev-parse", "HEAD");
@@ -154,14 +158,14 @@ function preflight(scenario: Scenario): { status: number | null; output: string;
     }
     const summary = join(directory, "summary.md");
     writeFileSync(summary, "");
-    const result = Bun.spawnSync(["bash", PREFLIGHT], {
+    const result = Bun.spawnSync(["bash", join(repo, "scripts/ci/release-preflight.sh")], {
       cwd: repo,
       env: {
         ...gitEnv,
         PATH: `${bin}${delimiter}${gitEnv.PATH}`,
-        RELEASE_VERSION: scenario.version ?? OWN_VERSION,
-        NPM_DIST_TAG: scenario.distTag ?? OWN_TAG,
-        GITHUB_REF: scenario.ref ?? OWN_REF,
+        RELEASE_VERSION: scenario.version ?? FIXTURE_VERSION,
+        NPM_DIST_TAG: scenario.distTag ?? FIXTURE_TAG,
+        GITHUB_REF: scenario.ref ?? FIXTURE_REF,
         GITHUB_SHA: head,
         DRY_RUN: String(scenario.dryRun ?? false),
         RESUME: String(scenario.resume ?? false),
@@ -183,13 +187,26 @@ function preflight(scenario: Scenario): { status: number | null; output: string;
 }
 
 describe.skipIf(process.platform === "win32")("scripts/ci/release-preflight.sh, executed", () => {
+  test("a personal prerelease cannot pass the main publication gate", () => {
+    const result = preflight({ version: "2.89.1-dalsoop.1" });
+    expect(result.status, result.output).toBe(1);
+    expect(result.output).toContain("main releases must use a stable semver version");
+    expect(result.output).toContain("found 1 blocking problem(s)");
+  }, SPAWN_BUDGET_MS);
+
+  test("a valid preview uses the preview channel", () => {
+    const result = preflight({ version: "2.89.1-preview.1", ref: "refs/heads/preview", distTag: "preview" });
+    expect(result.status, result.output).toBe(0);
+    expect(result.output).toContain("Release preflight passed");
+  }, SPAWN_BUDGET_MS);
+
   test("replays run 35783865160: a higher-core tag refuses the release before packaging", () => {
-    const blocker = OWN_IS_PREVIEW ? `v${NEXT_CORE}` : `v${NEXT_CORE}-preview.20260923`;
+    const blocker = FIXTURE_IS_PREVIEW ? `v${NEXT_CORE}` : `v${NEXT_CORE}-preview.20260923`;
     const result = preflight({ tags: ["v0.0.1", blocker] });
     expect(result.status, result.output).toBe(1);
-    expect(result.output).toContain(`${OWN_VERSION} does not outrank the current tag set`);
+    expect(result.output).toContain(`${FIXTURE_VERSION} does not outrank the current tag set`);
     expect(result.output).toContain("found 1 blocking problem(s)");
-    expect(result.summary).toContain(`Release preflight refused ${OWN_VERSION}`);
+    expect(result.summary).toContain(`Release preflight refused ${FIXTURE_VERSION}`);
   }, SPAWN_BUDGET_MS);
 
   test("passes a release every check can already approve", () => {
@@ -227,7 +244,7 @@ describe.skipIf(process.platform === "win32")("scripts/ci/release-preflight.sh, 
   }, SPAWN_BUDGET_MS);
 
   test("requires the dev pre-move", () => {
-    const behind = preflight({ tags: ["v0.0.1"], devVersion: OWN_VERSION });
+    const behind = preflight({ tags: ["v0.0.1"], devVersion: FIXTURE_VERSION });
     expect(behind.status, behind.output).toBe(1);
     expect(behind.output).toContain("merge the dev pre-move first");
     const missing = preflight({ tags: ["v0.0.1"], devVersion: null });
@@ -236,10 +253,10 @@ describe.skipIf(process.platform === "win32")("scripts/ci/release-preflight.sh, 
   }, SPAWN_BUDGET_MS);
 
   test("reports every problem in one run", () => {
-    const wrongTag = OWN_TAG === "latest" ? "preview" : "latest";
+    const wrongTag = FIXTURE_TAG === "latest" ? "preview" : "latest";
     const result = preflight({ tags: ["v0.0.1"], distTag: wrongTag, npm: "present" });
     expect(result.status, result.output).toBe(1);
-    expect(result.output).toContain(`npm dist-tag '${OWN_TAG}'`);
+    expect(result.output).toContain(`npm dist-tag '${FIXTURE_TAG}'`);
     expect(result.output).toContain("already exists on npm");
     expect(result.output).toContain("found 2 blocking problem(s)");
   }, SPAWN_BUDGET_MS);
