@@ -186,7 +186,7 @@ describe("Desktop snapshot through authenticated model discovery", () => {
       port: 0, hostname: "0.0.0.0", defaultProvider: "test", runtimeRole: "hub",
       ...(pickerOrder ? { modelPickerOrder: pickerOrder, subagentModels: [], subagentModelsVersion: SUBAGENT_MODELS_VERSION } : {}),
       providers: {
-        test: { adapter: "openai-chat", baseUrl: `http://127.0.0.1:${upstream.port}/v1`, apiKey: "fixture", allowPrivateNetwork: true, models: ["model-123", "model-155"], reasoningEfforts: ["low", "medium", "high", "xhigh", "max"] },
+        test: { adapter: "openai-chat", baseUrl: `http://127.0.0.1:${upstream.port}/v1`, apiKey: "fixture", allowPrivateNetwork: true, models: ["model-123", "model-155"], selectedModels: ["model-123", "model-155"], reasoningEfforts: ["low", "medium", "high", "xhigh", "max"] },
       },
       claudeCode: {
         enabled, desktopNativeModels: false,

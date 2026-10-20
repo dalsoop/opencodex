@@ -9,6 +9,54 @@ import {
 const now = "2026-08-24T02:11:00Z";
 
 describe("new-model policy", () => {
+  test("an unconfigured policy keeps a 600-model discovery out of the picker", () => {
+    const config = {
+      port: 10100, defaultProvider: "vendor",
+      providers: { vendor: { defaultModel: "model-3" } },
+    } as Parameters<typeof reconcileSuccessfulModelDiscoveries>[0]["config"];
+    const models = Array.from({ length: 600 }, (_, i) => ({ provider: "vendor", id: `model-${i}` }));
+    expect(effectiveNewModelPolicy(config, "vendor")).toBe("off");
+    reconcileSuccessfulModelDiscoveries({ config, models, authoritativeProviders: ["vendor"], now });
+    expect(config.disabledModels).toHaveLength(599);
+    expect(config.disabledModels).not.toContain("vendor/model-3");
+    // A manual choice survives repeated discovery and a new arrival remains off.
+    config.disabledModels = config.disabledModels!.filter(id => id !== "vendor/model-7");
+    reconcileSuccessfulModelDiscoveries({ config, models: [...models, { provider: "vendor", id: "new" }], authoritativeProviders: ["vendor"], now });
+    expect(config.disabledModels).not.toContain("vendor/model-7");
+    expect(config.disabledModels).toContain("vendor/new");
+  });
+
+  test("bootstrap without a default exposes nothing; explicit selections and all-on remain authoritative", () => {
+    for (const provider of [{}, { selectedModels: ["a"] }, { newModelPolicy: "on" as const }]) {
+      const config = { port: 10100, defaultProvider: "vendor", providers: { vendor: provider } } as Parameters<typeof reconcileSuccessfulModelDiscoveries>[0]["config"];
+      reconcileSuccessfulModelDiscoveries({ config, models: [{ provider: "vendor", id: "a" }, { provider: "vendor", id: "b" }], authoritativeProviders: ["vendor"], now });
+      expect(config.disabledModels ?? []).toEqual("selectedModels" in provider || "newModelPolicy" in provider ? [] : ["vendor/a", "vendor/b"]);
+    }
+  });
+
+  test("bootstrap preserves explicit model switches, static catalogs, and degraded discovery", () => {
+    for (const mode of ["switches", "static", "degraded"] as const) {
+      const config = { port: 10100, defaultProvider: "vendor", providers: { vendor: {
+        ...(mode === "static" ? { liveModels: false } : {}),
+      } }, ...(mode === "switches" ? { disabledModels: ["vendor/b"] } : {}) } as Parameters<typeof reconcileSuccessfulModelDiscoveries>[0]["config"];
+      reconcileSuccessfulModelDiscoveries({ config, models: [{ provider: "vendor", id: "a" }, { provider: "vendor", id: "b" }], authoritativeProviders: mode === "degraded" ? [] : ["vendor"], now });
+      expect(config.disabledModels ?? []).toEqual(mode === "switches" ? ["vendor/b"] : []);
+    }
+  });
+
+  test("a legacy unselected 600-model baseline is narrowed once, without resetting later choices", () => {
+    const models = Array.from({ length: 600 }, (_, i) => ({ provider: "vendor", id: `model-${i}` }));
+    const config = { port: 10100, defaultProvider: "vendor", providers: { vendor: { defaultModel: "model-3" } },
+      modelDiscovery: { knownModels: { vendor: { ids: models.map(row => row.id), removed: [], updatedAt: now } } },
+    } as Parameters<typeof reconcileSuccessfulModelDiscoveries>[0]["config"];
+    reconcileSuccessfulModelDiscoveries({ config, models, authoritativeProviders: ["vendor"], now });
+    expect(config.disabledModels).toHaveLength(599);
+    expect(config.disabledModels).not.toContain("vendor/model-3");
+    config.disabledModels = [];
+    expect(reconcileSuccessfulModelDiscoveries({ config, models, authoritativeProviders: ["vendor"], now })).toBe(false);
+    expect(config.disabledModels).toEqual([]);
+  });
+
   test("bootstraps without hiding the existing catalog", () => {
     const r = applyNewModelPolicy({ provider: "openrouter", discoveredIds: ["a", "b"], policy: "off", now });
     expect(r.newIds).toEqual([]); expect(r.slugsToDisable).toEqual([]); expect(r.nextBaseline.ids).toEqual(["a", "b"]);

@@ -7796,7 +7796,7 @@ describe("#2465 model preset management routes", () => {
     const config = presetConfig(["anthropic/claude-opus-5"], { mode: "preset", appliedVersion: 1 });
     await call(config, "PUT", { provider: "openrouter", mode: "all" });
     expect(config.providers.openrouter.selectedModels).toBeUndefined();
-    expect(config.providers.openrouter.modelPreset).toBeUndefined();
+    expect(config.providers.openrouter.modelPreset).toEqual({ mode: "all" });
   });
 
   test("a preset matching nothing never writes an empty allowlist", async () => {

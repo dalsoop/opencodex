@@ -104,7 +104,7 @@ managed map을 활성화하면 privacy-safe selector를 만들고, 이후 계정
 | `defaultModel?` | `string` | 이 공급자를 선택할 때 모델을 따로 지정하지 않으면 사용하는 모델입니다. |
 | `models?` | `string[]` | 초기/폴백 모델 목록입니다. `liveModels: false`에서 `models`가 비어 있지 않으면 `models`, `retainModels` 순으로 구성합니다. `models`가 비어 있거나 생략되면 설정된 `defaultModel`, `retainModels` 순으로 구성하고, 중복 ID는 처음 나온 항목만 남깁니다. |
 | `liveModels?` | `boolean` | 시작 또는 동기화 시 라이브 카탈로그를 가져옵니다. 기본값은 `true`입니다. 사용자 지정 공급자는 `${baseUrl}/models`를 사용하고, 내장은 레지스트리 URL을 사용한 뒤 필터링할 수 있습니다. |
-| `selectedModels?` | `string[]` | 발견 후 카탈로그 허용 목록입니다. 값이 비어 있지 않으면 그 id만 노출하고, 비어 있거나 생략하면 발견된 모델을 모두 노출합니다. |
+| `selectedModels?` | `string[]` | 발견 후 카탈로그 허용 목록입니다. 값이 있으면 그 id만 허용하며, 비어 있거나 생략하면 추가 허용 목록을 적용하지 않습니다. 탐색 정책과 `disabledModels`는 계속 적용됩니다. |
 | `modelDisplayNames?` | `Record<string, string>` | 이 공급자의 정확한 네이티브 모델 id를 키로 쓰는 영구 표시 전용 이름입니다. 키는 대소문자를 구분합니다. 이름은 공급자 카탈로그 메타데이터보다 우선하며 인증, 어댑터, 라우팅, 청구 또는 업스트림 요청을 바꾸지 않습니다. 맵은 발견 한도와 같은 최대 2,000개 항목을 가질 수 있습니다. |
 | `contextWindow?` | `number` | 업스트림 메타데이터가 없을 때 쓰이는 공급자 전반의 컨텍스트 값입니다. 메타데이터가 있으면 상한으로 동작해 더 작은 라이브 값을 그대로 둡니다. Models 대시보드에서 `providerContextCaps`와 별도로 설정합니다. |
 | `modelContextWindows?` | `Record<string, number>` | 모델별 컨텍스트 값이자 상한입니다. `contextWindow`보다 우선하며, 창 크기를 알 수 없으면 설정값을 쓰고 더 작은 라이브 메타데이터가 있으면 그쪽을 따릅니다. |

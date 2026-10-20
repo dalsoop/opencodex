@@ -50,6 +50,27 @@ const cases: Array<{
   { name: "inherited global on", global: "on", visible: true },
 ];
 
+test("first HTTP discovery with no policy exposes only the configured default", () => lifecycle.run(async () => {
+  const ids = Array.from({ length: 600 }, (_, i) => `model-${i}`);
+  const upstream = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () =>
+    Response.json({ data: ids.map(id => ({ id })) }) });
+  lifecycle.ownStop(() => upstream.stop(true));
+  saveConfig({ port: 0, hostname: "127.0.0.1", defaultProvider: provider,
+    clientIntegrations: { codex: false }, providers: { [provider]: {
+      adapter: "openai-chat", baseUrl: new URL("/v1", upstream.url).href,
+      apiKey: "fixture-key", allowPrivateNetwork: true, liveModels: true, defaultModel: "model-3",
+    } } });
+  const { startServer } = await import("../../src/server");
+  const server = startServer(0);
+  lifecycle.ownStop(() => server.stop(true));
+  const response = await fetch(new URL("/v1/models", server.url), { signal: lifecycle.abort.signal });
+  expect(response.status).toBe(200);
+  const body = await response.json() as { data: Array<{ id: string }> };
+  expect(body.data.map(row => row.id).filter(id => id.startsWith(`${provider}/`)))
+    .toEqual([`${provider}/model-3`]);
+  expect(loadConfig().disabledModels).toHaveLength(599);
+}, SERVER_BUDGET_MS), SERVER_BUDGET_MS);
+
 // Discovery is driven through the real HTTP route, never by calling policy reconciliation, so the
 // assertions below check the persisted contract under test (#6260): an absorbed baseline, a
 // recorded arrival, a surviving manual block, and a manual re-enable that holds across refresh.

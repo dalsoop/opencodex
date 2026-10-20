@@ -82,18 +82,7 @@ Routing and catalog visibility are separate controls:
   for that model.
 - A provider's non-empty `selectedModels` is another catalog allowlist. Live discovery and direct
   routing still work; only catalog and `/v1/models` emission are narrowed.
-- Fresh installs set `modelDiscovery.newModelPolicy` to `"off"`. After the first successful live
-  fetch establishes a baseline, later arrivals are appended to `disabledModels` and carry a **NEW**
-  dashboard badge until enabled or acknowledged. Existing installs remain `"on"` until opted in.
-  The policy applies before publishing newly discovered models through `/v1/models`, the dashboard,
-  client configuration exports, or a Codex catalog sync (including service startup).
-  Enabling an arrival manually keeps it enabled on later refreshes and exports.
-  If the running provider configuration differs from disk, model lists still apply the policy
-  using a temporary projection; they leave the running configuration and saved choices untouched.
-  Use `ocx models new-policy off` globally, add `--provider <name>` for an override, and inspect
-  `ocx models new-arrivals [--json]`. Failed/degraded fetches never change the baseline. Providers
-  with a non-empty `selectedModels` (including preset mode) are already curated, so this policy is
-  deliberately inert for them.
+- `modelDiscovery.newModelPolicy` defaults to `"off"`, including when omitted in an existing configuration. On the first successful live discovery, only the configured `defaultModel` starts visible; without a matching default, enable the models you need in **Models**. Saved model selections, per-model switches and short existing baselines are preserved. An existing unselected live catalog with at least 20 models is narrowed to the configured default once; later manual changes are not reset. Static/manual catalogs are unchanged. Later arrivals remain hidden until enabled. Explicit `"on"` opts into automatic exposure. This policy applies before `/v1/models`, client exports and Codex catalog publication; failed discovery changes no choices. Use `ocx models new-policy off` (optionally `--provider <name>`) and `ocx models new-arrivals --json`.
 - `provider.disabled: true` removes that provider from catalog discovery. Explicit
   `provider/model` requests fail, and `defaultModel` / `models[]` scans skip it.
 - Routed catalog rows are cloned from the Codex-native template, so native-only delivery flags are

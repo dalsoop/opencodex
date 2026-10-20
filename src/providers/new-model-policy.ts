@@ -1,5 +1,6 @@
 import type { OcxConfig } from "../types";
 import { routedSlug, slugEquals } from "./slug-codec";
+import { INITIAL_MODEL_SELECTION_THRESHOLD } from "./initial-model-selection";
 import {
   antigravityEffortFamilyIds, antigravityFamilyDisabled,
   type AntigravityEffortFamilyRow,
@@ -41,6 +42,7 @@ export interface NewModelPolicyResult {
  */
 function baselineDiffers(prior: KnownModelBaseline | undefined, next: KnownModelBaseline): boolean {
   if (!prior) return true;
+  if (prior.visibilityInitialized !== next.visibilityInitialized) return true;
   const sameList = (a: readonly string[], b: readonly string[]) =>
     a.length === b.length && a.every((value, index) => value === b[index]);
   if (!sameList(prior.ids, next.ids) || !sameList(prior.removed, next.removed)) return true;
@@ -51,25 +53,32 @@ function baselineDiffers(prior: KnownModelBaseline | undefined, next: KnownModel
   return false;
 }
 
-/** Pure successful-discovery transition. An absent baseline bootstraps without hiding anything. */
+/** Pure successful-discovery transition; callers may supply the initial visible choices. */
 export function applyNewModelPolicy(options: {
   provider: string;
   discoveredIds: Iterable<string>;
   baseline?: KnownModelBaseline;
   policy: NewModelPolicy;
   hasSelectedModels?: boolean;
+  /** Configured default on first discovery; omitted when preserving existing switch choices. */
+  initiallyVisibleIds?: Iterable<string>;
   now: string;
   /** See {@link NewModelPolicyMode}; defaults to `converge`. */
   mode?: NewModelPolicyMode;
 }): NewModelPolicyResult {
   const discovered = [...new Set(options.discoveredIds)].sort();
   const prior = options.baseline;
+  const visible = options.initiallyVisibleIds === undefined ? null : new Set(options.initiallyVisibleIds);
   if (!prior) {
+    const overflow = discovered.length > MAX_KNOWN_MODELS_PER_PROVIDER;
     return {
       newIds: [],
-      nextBaseline: { ids: discovered, removed: [], updatedAt: options.now },
-      slugsToDisable: [], arrivals: [],
-      overflow: discovered.length > MAX_KNOWN_MODELS_PER_PROVIDER,
+      nextBaseline: { ids: discovered, removed: [], updatedAt: options.now,
+        ...(visible !== null ? { visibilityInitialized: true } : {}) },
+      slugsToDisable: !overflow && options.policy === "off" && !options.hasSelectedModels && visible !== null
+        ? discovered.filter(id => !visible.has(id)).map(id => routedSlug(options.provider, id)) : [],
+      arrivals: [],
+      overflow,
     };
   }
   const active = new Set(prior.ids);
@@ -102,12 +111,14 @@ export function applyNewModelPolicy(options: {
     newIds,
     nextBaseline: {
       ids: [...active].sort(), removed: [...removed].sort(), updatedAt: options.now,
+      ...(prior.visibilityInitialized || options.initiallyVisibleIds !== undefined ? { visibilityInitialized: true } : {}),
       ...(Object.keys(missing).length ? { missing } : {}),
     },
     // A non-empty preset/custom allowlist already excludes arrivals. This explicit no-op is
     // deliberate: preset mode owns which matching flagships arrive on.
     slugsToDisable: !overflow && options.policy === "off" && !options.hasSelectedModels
-      ? newIds.map(id => routedSlug(options.provider, id)) : [],
+      ? (visible === null ? newIds : discovered.filter(id => !visible.has(id)))
+        .map(id => routedSlug(options.provider, id)) : [],
     arrivals,
     overflow,
   };
@@ -116,7 +127,7 @@ export function applyNewModelPolicy(options: {
 export function effectiveNewModelPolicy(config: OcxConfig, provider: string): NewModelPolicy {
   const local = config.providers[provider]?.newModelPolicy;
   if (local === "on" || local === "off") return local;
-  return config.modelDiscovery?.newModelPolicy ?? "on";
+  return config.modelDiscovery?.newModelPolicy ?? "off";
 }
 
 /** Normalize policy identities only; the original rows and saved wire selections stay intact. */
@@ -147,7 +158,9 @@ function normalizeEffortFamilies(config: OcxConfig, provider: string, rows: Anti
     baseline = { ...prior, ids: normalizeIds(prior.ids), removed: normalizeIds(prior.removed),
       ...(Object.keys(missing).length ? { missing } : {}) };
   }
-  return { discoveredIds: normalizeIds(rows.map(row => row.id)), baseline, inheritedDisables };
+  const defaultModel = config.providers[provider]?.defaultModel;
+  return { discoveredIds: normalizeIds(rows.map(row => row.id)), baseline, inheritedDisables,
+    defaultModel: defaultModel ? normalize(defaultModel) : undefined };
 }
 
 /** Apply authoritative provider rows to a mutable convergence copy; degraded providers are omitted. */
@@ -169,7 +182,7 @@ export function reconcileSuccessfulModelDiscoveries(options: {
   for (const provider of options.authoritativeProviders) {
     const configured = options.config.providers[provider];
     if (!configured || configured.liveModels === false) continue;
-    const { discoveredIds, baseline, inheritedDisables } = normalizeEffortFamilies(
+    const { discoveredIds, baseline, inheritedDisables, defaultModel } = normalizeEffortFamilies(
       options.config, provider, byProvider.get(provider) ?? [],
     );
     const discovery = options.config.modelDiscovery ??= {};
@@ -178,6 +191,12 @@ export function reconcileSuccessfulModelDiscoveries(options: {
       provider, discoveredIds, baseline,
       policy: effectiveNewModelPolicy(options.config, provider),
       hasSelectedModels: (configured.selectedModels?.length ?? 0) > 0,
+      // A previous per-model switch edit is an explicit choice too. Never reinitialize it.
+      initiallyVisibleIds: baseline?.visibilityInitialized
+        || (baseline && discoveredIds.length < INITIAL_MODEL_SELECTION_THRESHOLD)
+        || (configured.modelPreset?.mode === "all" && !configured.modelPreset.fallback)
+        || options.config.disabledModels?.some(selector => discoveredIds.some(id => slugEquals(selector, provider, id)))
+        ? undefined : defaultModel ? [defaultModel] : [],
       now: options.now,
       mode: options.mode,
     });

@@ -125,3 +125,7 @@ Le routage et la visibilité dans le catalogue sont deux mécanismes distincts :
   un fournisseur portant ce nom (par exemple `anthropic` ou `groq`) est effectivement configuré.
 
 Consultez [Configuration](/fr/reference/configuration/) pour connaître les champs de fournisseur lus par ces règles.
+
+## Model discovery defaults
+
+`modelDiscovery.newModelPolicy` vaut `"off"` par défaut, même si le champ est absent. À la première découverte réussie, seul le `defaultModel` configuré est visible ; sinon, activez les modèles nécessaires dans Models. Les sélections, interrupteurs, petites références existantes et catalogues statiques sont conservés. Un ancien catalogue en direct sans sélection comptant au moins 20 modèles est réduit une seule fois au modèle par défaut ; les choix manuels ultérieurs ne sont pas réinitialisés. Les nouveaux modèles restent masqués jusqu’à leur activation. Un `"on"` explicite autorise la publication automatique.

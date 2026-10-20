@@ -83,7 +83,7 @@ ocx models provider openrouter on
 | `defaultModel?` | `string` | 在未指定明確模型時選擇此供應商所使用的模型。 |
 | `models?` | `string[]` | 初始／後備模型列表。`liveModels: false` 時，非空 `models` 後接 `retainModels`；若 `models` 為空或省略，則按已設定的 `defaultModel`、`retainModels` 順序建立初始列表，重複 ID 僅保留首次出現的位置。 |
 | `liveModels?` | `boolean` | 在啟動／同步時擷取即時目錄（預設 `true`）。自訂供應商使用 `${baseUrl}/models`；內建可能使用 registry URL 並過濾。 |
-| `selectedModels?` | `string[]` | 探索後的目錄允許清單。非空時僅暴露那些 id；空或省略時暴露所有探索的模型。 |
+| `selectedModels?` | `string[]` | 探索後的允許清單。非空時僅允許這些 id；空白或省略時不增加允許清單。探索政策及 `disabledModels` 仍然適用。 |
 | `contextWindow?` | `number` | 供應商範圍的 Codex 可見 context 上限。較小的即時中繼資料被保留。 |
 | `modelContextWindows?` | `Record<string, number>` | Per-model context 上限。這些覆寫 `contextWindow` 且永不提高較小的即時中繼資料。 |
 | `inferContextWindow?` | `boolean` | 僅限自訂供應商，預設關閉。設為 `true` 時以內建模型中繼資料補足缺少的視窗；這是估計值，不代表中轉的實測容量。 |
