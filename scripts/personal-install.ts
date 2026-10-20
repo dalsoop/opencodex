@@ -80,7 +80,7 @@ async function main(): Promise<void> {
       await run(["git", "checkout", "--quiet", "--detach", "FETCH_HEAD"], staging);
       await run([bun, "install", "--frozen-lockfile"], staging);
       await run([bun, "run", "build:gui"], staging);
-      await run(cli(staging, "help"), staging, true);
+      await run([join(staging, "node_modules", "bun", "bin", "bun.exe"), join(staging, "src", "cli", "index.ts"), "help"], staging, true);
       renameSync(staging, release);
       staging = undefined;
     }
@@ -97,7 +97,8 @@ async function main(): Promise<void> {
       const bin = join(root, "bin");
       mkdirSync(bin, { recursive: true });
       const launcher = join(bin, "ocx");
-      writeFileSync(`${launcher}.next`, personalLauncher(root, bun), { mode: 0o755 });
+      const managedBun = join(root, "current", "node_modules", "bun", "bin", "bun.exe");
+      writeFileSync(`${launcher}.next`, personalLauncher(root, managedBun), { mode: 0o755 });
       renameSync(`${launcher}.next`, launcher);
     });
     console.log(`Installed ${sha}. Use ${join(root, "bin", "ocx")}; update with ocx update.`);
