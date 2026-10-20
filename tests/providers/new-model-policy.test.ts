@@ -73,16 +73,19 @@ describe("new-model policy", () => {
     expect(config.disabledModels).toEqual(["vendor/new"]);
   });
 
-  test("a preserved short baseline can grow past the threshold without hiding old models", () => {
+  test.each([false, true])("a short baseline survives threshold growth (previously reconciled: %s)", previouslyReconciled => {
     const models = Array.from({ length: 21 }, (_, i) => ({ provider: "vendor", id: `model-${i}` }));
     const config = { port: 10100, defaultProvider: "vendor", providers: { vendor: { defaultModel: "model-3" } },
       modelDiscovery: { knownModels: { vendor: { ids: models.slice(0, 19).map(row => row.id), removed: [], updatedAt: now } } },
     } as Parameters<typeof reconcileSuccessfulModelDiscoveries>[0]["config"];
-    reconcileSuccessfulModelDiscoveries({ config, models: models.slice(0, 19), authoritativeProviders: ["vendor"], now });
-    expect(config.disabledModels ?? []).toEqual([]);
-    expect(config.modelDiscovery!.knownModels!.vendor.visibilityInitialized).toBe(true);
+    if (previouslyReconciled) {
+      reconcileSuccessfulModelDiscoveries({ config, models: models.slice(0, 19), authoritativeProviders: ["vendor"], now });
+      expect(config.disabledModels ?? []).toEqual([]);
+      expect(config.modelDiscovery!.knownModels!.vendor.visibilityInitialized).toBe(true);
+    }
     reconcileSuccessfulModelDiscoveries({ config, models, authoritativeProviders: ["vendor"], now });
     expect(config.disabledModels).toEqual(["vendor/model-19", "vendor/model-20"]);
+    expect(config.modelDiscovery!.knownModels!.vendor.visibilityInitialized).toBe(true);
   });
 
   test("bootstraps without hiding the existing catalog", () => {
