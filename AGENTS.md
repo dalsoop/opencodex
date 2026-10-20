@@ -2,6 +2,17 @@
 
 Guidance for AI agents (and humans) working on or reviewing this repository.
 
+## Repository ownership and publishing target
+
+This is the independently maintained `dalsoop/opencodex` repository. Pushes,
+issues, and pull requests belong in `dalsoop/opencodex` unless the user explicitly
+requests a different destination for the current task.
+
+Do not open or update pull requests against `lidge-jun/opencodex`, or add it as
+a Git remote, without an explicit request to contribute upstream. Historical
+upstream links and the inherited maintainer instructions below do not authorize
+publishing changes there.
+
 ## What this project is
 
 opencodex (`ocx`) is a universal provider proxy for OpenAI Codex and Claude Code:
