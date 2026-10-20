@@ -126,6 +126,8 @@ Le routage et la visibilité dans le catalogue sont deux mécanismes distincts :
 
 Consultez [Configuration](/fr/reference/configuration/) pour connaître les champs de fournisseur lus par ces règles.
 
-## Model discovery defaults
+<a id="model-discovery-defaults"></a>
 
-`modelDiscovery.newModelPolicy` vaut `"off"` par défaut, même si le champ est absent. À la première découverte réussie, seul le `defaultModel` configuré est visible ; sinon, activez les modèles nécessaires dans Models. Les sélections, interrupteurs, petites références existantes et catalogues statiques sont conservés. Un ancien catalogue en direct sans sélection comptant au moins 20 modèles est réduit une seule fois au modèle par défaut ; les choix manuels ultérieurs ne sont pas réinitialisés. Les nouveaux modèles restent masqués jusqu’à leur activation. Un `"on"` explicite autorise la publication automatique.
+## Valeurs par défaut de la découverte de modèles
+
+`modelDiscovery.newModelPolicy` vaut `"off"` par défaut, même si le champ est absent. À la première découverte réussie, seul le `defaultModel` configuré est visible ; sinon, activez les modèles nécessaires dans Models. Les sélections, interrupteurs, petites références existantes et catalogues statiques sont conservés. Un ancien catalogue en direct sans sélection comptant au moins 20 modèles et un modèle par défaut configuré est réduit une seule fois à ce dernier ; sans modèle par défaut, sa visibilité est conservée ; les choix manuels ultérieurs ne sont pas réinitialisés. Les nouveaux modèles restent masqués jusqu’à leur activation. Un `"on"` explicite autorise la publication automatique. Utilisez `ocx models new-policy off` (avec `--provider <name>` si nécessaire) et `ocx models new-arrivals --json`.

@@ -99,6 +99,7 @@ Yönlendirme ve katalog görünürlüğü ayrı kontrollerdir:
 - Bir sağlayıcının boş olmayan `selectedModels` alanı başka bir katalog izin
   listesidir. Canlı keşif ve doğrudan yönlendirme hala çalışır; yalnızca katalog
   ve `/v1/models` yayını daraltılır.
+- **Model keşfi varsayılanları:** `modelDiscovery.newModelPolicy` varsayılanı `"off"` değeridir; alan yoksa da geçerlidir. İlk başarılı canlı keşifte yalnızca ayarlanan `defaultModel` görünür; eşleşme yoksa Models bölümünde gereken modelleri açın. Seçimler, anahtarlar, küçük mevcut temel listeler ve statik kataloglar korunur. Seçim yapılmamış en az 20 modellik eski canlı katalog, yapılandırılmış bir varsayılan model varsa bir kez o modele daraltılır; varsayılanı olmayan mevcut temel listelerin görünürlüğü korunur; sonraki elle değişiklikler sıfırlanmaz. Yeni modeller elle açılana kadar gizlidir. Açık `"on"` otomatik yayıma izin verir. `ocx models new-policy off` (isteğe bağlı `--provider <name>`) ve `ocx models new-arrivals --json` komutlarını kullanın.
 - `provider.disabled: true`, bu sağlayıcıyı katalog keşfinden kaldırır. Açık
   `sağlayıcı/model` istekleri başarısız olur ve `defaultModel` / `models[]`
   taramaları bunu atlar.
@@ -140,9 +141,3 @@ Yönlendirme ve katalog görünürlüğü ayrı kontrollerdir:
 
 Bu kuralların okuduğu sağlayıcı alanları için
 [Yapılandırma](/tr/reference/configuration/) sayfasına bakın.
-
-
-
-## Model discovery defaults
-
-`modelDiscovery.newModelPolicy` varsayılanı `"off"` değeridir; alan yoksa da geçerlidir. İlk başarılı canlı keşifte yalnızca ayarlanan `defaultModel` görünür; eşleşme yoksa Models bölümünde gereken modelleri açın. Seçimler, anahtarlar, küçük mevcut temel listeler ve statik kataloglar korunur. Seçim yapılmamış en az 20 modellik eski canlı katalog bir kez varsayılan modele daraltılır; sonraki elle değişiklikler sıfırlanmaz. Yeni modeller elle açılana kadar gizlidir. Açık `"on"` otomatik yayıma izin verir.

@@ -57,6 +57,18 @@ describe("new-model policy", () => {
     expect(config.disabledModels).toEqual([]);
   });
 
+  test("a legacy baseline without a default preserves visible models and hides only new arrivals", () => {
+    const ids = Array.from({ length: 600 }, (_, i) => `model-${i}`);
+    const config = { port: 10100, defaultProvider: "vendor", providers: { vendor: {} },
+      modelDiscovery: { knownModels: { vendor: { ids, removed: [], updatedAt: now } } },
+    } as Parameters<typeof reconcileSuccessfulModelDiscoveries>[0]["config"];
+    reconcileSuccessfulModelDiscoveries({ config,
+      models: [...ids, "new"].map(id => ({ provider: "vendor", id })), authoritativeProviders: ["vendor"], now });
+    expect(config.disabledModels).toEqual(["vendor/new"]);
+    expect(reconcileSuccessfulModelDiscoveries({ config,
+      models: [...ids, "new"].map(id => ({ provider: "vendor", id })), authoritativeProviders: ["vendor"], now })).toBe(false);
+  });
+
   test("bootstraps without hiding the existing catalog", () => {
     const r = applyNewModelPolicy({ provider: "openrouter", discoveredIds: ["a", "b"], policy: "off", now });
     expect(r.newIds).toEqual([]); expect(r.slugsToDisable).toEqual([]); expect(r.nextBaseline.ids).toEqual(["a", "b"]);

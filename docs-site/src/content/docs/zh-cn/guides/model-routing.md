@@ -72,7 +72,7 @@ transport；这些凭证路径互不 fallback。
   仍保留在目录中，但会改为 `visibility: "hide"`。它**不会**拒绝对该模型的直接请求。
 - 提供商的非空 `selectedModels` 是另一层目录 allowlist。实时发现和直接路由仍然有效；它只会缩小
   目录和 `/v1/models` 输出的模型范围。
-- `modelDiscovery.newModelPolicy` 默认为 `"off"`，现有配置省略此字段时也一样。首次成功的实时发现只显示配置的 `defaultModel`；没有匹配的默认模型时，请在 **Models** 中启用所需模型。保留已有选择列表、单模型开关、较短的发现基准和静态目录。未设置选择的现有实时目录达到20个模型时，只执行一次默认模型收窄，之后不重置手动更改。新发现的模型在手动启用前保持隐藏。显式 `"on"` 允许自动公开。该策略在发布目录前应用，发现失败不改变选择。使用 `ocx models new-policy off` 和 `ocx models new-arrivals --json` 管理。
+- `modelDiscovery.newModelPolicy` 默认为 `"off"`，现有配置省略此字段时也一样。首次成功的实时发现只显示配置的 `defaultModel`；没有匹配的默认模型时，请在 **Models** 中启用所需模型。保留已有选择列表、单模型开关、较短的发现基准和静态目录。未设置选择的现有实时目录达到20个模型且已配置默认模型时，只执行一次默认模型收窄；没有默认模型的现有发现基准保留原本的可见性，之后不重置手动更改。新发现的模型在手动启用前保持隐藏。显式 `"on"` 允许自动公开。该策略在发布目录前应用，发现失败不改变选择。使用 `ocx models new-policy off` 和 `ocx models new-arrivals --json` 管理。
 - `provider.disabled: true` 会把该提供商排除在目录发现之外。显式 `provider/model` 请求会失败，
   `defaultModel` / `models[]` 扫描也会跳过它。
 - `providerContextCaps` 为各提供商设置 Codex 可见的上下文上限。`contextCapValue` 是仪表盘的默认值，
