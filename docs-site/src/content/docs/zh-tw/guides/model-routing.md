@@ -81,6 +81,8 @@ OpenAI 的 bare `gpt-*` 使用單一 `openai` provider。`codexAccountMode` 在 
 
 這些規則讀取的供應商欄位請參見 [設定](/zh-tw/reference/configuration/)。
 
-## Model discovery defaults
+<a id="model-discovery-defaults"></a>
 
-`modelDiscovery.newModelPolicy` 預設為 `"off"`，省略此欄位時也相同。首次成功的即時探索只顯示設定的 `defaultModel`；沒有相符預設值時，請在 Models 啟用需要的模型。保留既有選擇清單、個別開關、較短的探索基準與靜態目錄。未設定選擇的既有即時目錄若有20個以上模型，只執行一次預設模型縮減，之後不重設手動變更。新模型在手動啟用前隱藏。明確的 `"on"` 允許自動公開。
+## 模型探索預設值
+
+`modelDiscovery.newModelPolicy` 預設為 `"off"`，省略此欄位時也相同。首次成功的即時探索只顯示設定的 `defaultModel`；沒有相符預設值時，請在 Models 啟用需要的模型。保留既有選擇清單、個別開關、較短的探索基準與靜態目錄。未設定選擇的既有即時目錄若有20個以上模型且已設定預設模型，只執行一次預設模型縮減；沒有預設模型的既有探索基準保留原本的可見性，之後不重設手動變更。新模型在手動啟用前隱藏。明確的 `"on"` 允許自動公開。 使用 `ocx models new-policy off`（可加上 `--provider <name>`）與 `ocx models new-arrivals --json`。
