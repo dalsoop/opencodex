@@ -1,3 +1,5 @@
+> **dalsoop/opencodex:** независимо поддерживаемый репозиторий. Для этой версии используйте [инструкции по личной установке и обновлению](../PERSONAL.md). Ссылки на пакеты и выпуски исходного проекта ниже относятся к его дистрибутиву.
+
 <p align="center">
   <img src="../assets/banner.png" alt="opencodex — универсальный прокси провайдеров для Codex, Claude Code, Claude Desktop и Grok Build" width="100%">
 </p>

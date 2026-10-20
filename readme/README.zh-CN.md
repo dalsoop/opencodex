@@ -1,3 +1,5 @@
+> **dalsoop/opencodex：** 独立维护的仓库。此版本请遵循[个人安装与更新说明](../PERSONAL.md)。下方原项目的软件包和发布链接指向原项目的发行版。
+
 <p align="center">
   <img src="../assets/banner.png" alt="opencodex —— 面向 Codex、Claude Code、Claude Desktop 和 Grok Build 的通用提供商代理" width="100%">
 </p>

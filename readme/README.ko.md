@@ -1,3 +1,5 @@
+> **dalsoop/opencodex:** 독립적으로 관리하는 저장소입니다. 이 버전은 [개인 설치·업데이트 안내](../PERSONAL.md)를 따라 설치하세요. 아래 원본 프로젝트의 패키지·릴리스 링크는 원본 배포판을 가리킵니다.
+
 <p align="center">
   <img src="../assets/banner.png" alt="opencodex — Codex, Claude Code, Claude Desktop, Grok Build를 위한 범용 프로바이더 프록시" width="100%">
 </p>

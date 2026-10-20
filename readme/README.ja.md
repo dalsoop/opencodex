@@ -1,3 +1,5 @@
+> **dalsoop/opencodex:** 独立して管理するリポジトリです。このバージョンは[個人用のインストール・更新手順](../PERSONAL.md)に従ってください。以下の元プロジェクトのパッケージ・リリースリンクは元の配布版を指します。
+
 <p align="center">
   <img src="../assets/banner.png" alt="opencodex — Codex、Claude Code、Claude Desktop、Grok Build のための汎用プロバイダープロキシ" width="100%">
 </p>

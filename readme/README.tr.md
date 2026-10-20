@@ -1,3 +1,5 @@
+> **dalsoop/opencodex:** bağımsız olarak yönetilen depo. Bu sürüm için [kişisel kurulum ve güncelleme yönergelerini](../PERSONAL.md) izleyin. Aşağıdaki özgün proje paket ve sürüm bağlantıları özgün dağıtıma aittir.
+
 <p align="center">
   <img src="../assets/banner.png" alt="opencodex — Codex, Claude Code, Claude Desktop ve Grok Build için evrensel sağlayıcı proxy'si" width="100%">
 </p>

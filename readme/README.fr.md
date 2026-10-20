@@ -1,3 +1,5 @@
+> **dalsoop/opencodex :** dépôt maintenu indépendamment. Pour cette version, suivez les [instructions personnelles d’installation et de mise à jour](../PERSONAL.md). Les liens de paquets et de versions du projet original ci-dessous concernent sa distribution.
+
 <p align="center">
   <img src="../assets/banner.png" alt="opencodex — proxy universel de fournisseurs pour Codex, Claude Code, Claude Desktop et Grok Build" width="100%">
 </p>
