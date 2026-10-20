@@ -202,6 +202,9 @@ export function reconcileSuccessfulModelDiscoveries(options: {
       mode: options.mode,
     });
     if (result.overflow) continue;
+    // Preserving an existing roster is a completed visibility decision too. A later default
+    // edit or growth past the bootstrap threshold must not reinitialize those choices.
+    result.nextBaseline.visibilityInitialized = true;
     const priorBaseline = known[provider];
     const baselineChanged = baselineDiffers(priorBaseline, result.nextBaseline);
     known[provider] = result.nextBaseline;

@@ -15,7 +15,7 @@ function fixture(): OcxConfig {
   return { port: 10100, defaultProvider: "vendor", providers: { vendor: {
     adapter: "openai-chat", baseUrl: "https://fixture.invalid/v1", models: ["a", "b"], newModelPolicy: "off",
   } }, disabledModels: ["vendor/b"], modelDiscovery: {
-    knownModels: { vendor: { ids: ["a", "b"], removed: [], updatedAt: stamp } },
+    knownModels: { vendor: { ids: ["a", "b"], removed: [], updatedAt: stamp, visibilityInitialized: true } },
   } };
 }
 const bytes = () => readFileSync(home.path("config.json"), "utf8");
