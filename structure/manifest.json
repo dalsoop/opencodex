@@ -848,6 +848,13 @@
       ]
     },
     {
+      "path": "ops/personal-install.md",
+      "tier": 6,
+      "title": "Independent Installation",
+      "scope": "Managed source installation and CI for the independently maintained repository.",
+      "documents": ["scripts/personal-install.ts", ".github/workflows/personal-ci.yml"]
+    },
+    {
       "path": "ops/docs-and-release.md",
       "tier": 6,
       "title": "Docs And Release",

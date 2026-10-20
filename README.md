@@ -1,3 +1,7 @@
+> **dalsoop/opencodex:** independently maintained repository. Use the
+> [personal installation and update instructions](PERSONAL.md) for this version.
+> The original project's package and release links below describe its distribution.
+
 <p align="center">
   <img src="assets/banner.png" alt="opencodex — universal provider proxy for Codex, Claude Code, Claude Desktop and Grok Build" width="100%">
 </p>

@@ -1,5 +1,14 @@
 # Maintainers
 
+## Independent repository ownership
+
+`dalsoop` owns `dalsoop/opencodex`. The owner has explicitly authorized integrating
+the model visibility fix and personal installation tooling into this repository's
+`main`, after local checks and exact-head Personal repository CI. Installation and
+workflow changes still require a security review. The inherited project governance
+below records the original project's policy; it grants no publishing or review
+authority over this independent repository.
+
 This document lists the people responsible for maintaining opencodex and defines the project's
 review and merge policy.
 

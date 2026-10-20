@@ -5,6 +5,7 @@ import {
   lstatSync,
   mkdirSync,
   mkdtempSync,
+  readlinkSync,
   statSync,
   symlinkSync,
   writeFileSync,
@@ -13,6 +14,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { normalizePackageModes } from "../../scripts/prepare-package";
+import { activatePersonalRelease, personalLauncher } from "../../scripts/personal-install";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 import { repoRoot as resolveRepoRoot } from "../helpers/repo-root";
 
@@ -52,6 +54,39 @@ async function readText(path: string): Promise<string> {
 }
 
 describe("install scripts", () => {
+  test.skipIf(process.platform === "win32")("personal install keeps the previous release on activation failure", async () => {
+    const fixture = mkdtempSync(join(tmpdir(), "ocx-personal-"));
+    try {
+      const oldRelease = join(fixture, "old");
+      const newRelease = join(fixture, "new");
+      mkdirSync(oldRelease);
+      mkdirSync(newRelease);
+      symlinkSync(oldRelease, join(fixture, "current"));
+      await expect(activatePersonalRelease(fixture, newRelease, async () => {
+        expect(readlinkSync(join(fixture, "current"))).toBe(newRelease);
+        throw new Error("service failed");
+      })).rejects.toThrow("service failed");
+      expect(readlinkSync(join(fixture, "current"))).toBe(oldRelease);
+      await activatePersonalRelease(fixture, newRelease, async () => {});
+      expect(readlinkSync(join(fixture, "current"))).toBe(newRelease);
+    } finally { removeModeFixture(fixture); }
+  });
+
+  test.skipIf(process.platform === "win32")("personal launcher sends updates to our source installer and preserves arguments", () => {
+    const fixture = mkdtempSync(join(tmpdir(), "ocx-personal-'quoted-"));
+    try {
+      const bun = join(fixture, "fake bun");
+      writeExecutable(bun, '#!/bin/sh\nprintf "%s\\n" "$@"\n');
+      const launcher = join(fixture, "ocx");
+      writeExecutable(launcher, personalLauncher(fixture, bun));
+      const result = spawnSync(launcher, ["update", "--check"], { encoding: "utf8" });
+      expect(result.status).toBe(0);
+      expect(result.stdout.trim().split("\n")).toEqual([
+        join(fixture, "current", "scripts", "personal-install.ts"), "--check",
+      ]);
+    } finally { removeModeFixture(fixture); }
+  });
+
   test("npm package main is a Node-safe wrapper while Bun keeps the TypeScript API", async () => {
     const pkg = JSON.parse(await readText("package.json")) as {
       main?: string;

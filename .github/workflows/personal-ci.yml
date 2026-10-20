@@ -1,0 +1,46 @@
+name: Personal repository CI
+
+on:
+  push:
+    branches: [main, personal/main-integration]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: personal-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    if: github.repository == 'dalsoop/opencodex'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+          fetch-tags: true
+      - uses: ./.github/actions/setup-project-bun
+        with:
+          role: test-runner
+      - run: bun install --frozen-lockfile
+      - run: bun run typecheck
+      - run: bun run structure:check
+      - run: bun run privacy:scan
+      - run: bun run build:gui
+      - run: bun run test --retry=1
+  docs:
+    if: github.repository == 'dalsoop/opencodex'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-project-bun
+      - run: bun install --frozen-lockfile
+        working-directory: docs-site
+      - run: bun run build
+        working-directory: docs-site

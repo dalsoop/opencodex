@@ -1,0 +1,31 @@
+# Independent installation
+
+This repository is maintained at **dalsoop/opencodex**. Its model visibility fixes
+are installed from our `main`, separately from the original npm package.
+
+On macOS or Linux, with Git, Node.js and Bun installed:
+
+```sh
+git clone https://github.com/dalsoop/opencodex.git
+cd opencodex
+bun scripts/personal-install.ts --service
+```
+
+Put `~/.local/share/opencodex-personal/bin` first in `PATH`. The managed command
+is `ocx`; `ocx update --check` prints our latest main commit, and `ocx update`
+installs that exact commit. Omit `--service` on the first install to manage the
+proxy manually. Once selected, service management persists across updates.
+
+The installer prepares dependencies with frozen lockfiles and builds the GUI
+before switching installations. Releases live under
+`~/.local/share/opencodex-personal/releases/<commit>`. It atomically switches
+`current`, restores the previous pointer if activation fails, and attempts to
+restore the previous service. Old releases remain available for recovery.
+An interrupted install leaves `install.lock`; remove it only after confirming
+no installer is running. User configuration and credentials remain in their
+existing state directories. The source installation disables the npm updater;
+the managed launcher routes `ocx update` exclusively to this installer.
+
+Personal repository CI runs the full Bun suite, typecheck, structure/privacy
+checks and documentation build. It publishes no packages and uses no secrets.
+The inherited cross-platform workflows remain available separately.
