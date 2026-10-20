@@ -174,9 +174,11 @@ function runStatusProbe(options: {
       runtimeEnv.LOCALAPPDATA = join(opencodexHome, "local-app-data");
       runtimeEnv.FIXTURE_RUNTIME_DIRS = JSON.stringify({ selected: selectedDir, lower: lowerDir, rejected: rejectedDir });
       runtimeEnv.FIXTURE_FULL_DIAGNOSTICS = options.fullDiagnostics ? "1" : "0";
+      // This fixture tests fallback to a saved choice, not discovery upgrades. An unpinned
+      // record can legitimately hand over to a newer system-wide install outside fixture PATH.
       if (options.persisted) writeFileSync(join(opencodexHome, "codex-runtime.json"), JSON.stringify({
         version: 1, command: selected, source: "configured", selectedVersion: "0.145.0",
-        updatedAt: "2026-08-28T00:00:00.000Z",
+        updatedAt: "2026-08-28T00:00:00.000Z", origin: "pinned",
       }));
     }
 
