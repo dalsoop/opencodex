@@ -862,11 +862,11 @@ describe("resolveCodexRuntime", () => {
     const deps = { env: { PATH: "" }, discoverAlternatives: false };
 
     try {
-      const cached = resolveCodexRuntime(deps);
-      expect(cached.runtime.source).toBe("fallback");
+      // This case compares absent versions, not host installation discovery. Seed the
+      // observed selection directly so system-wide Codex installs cannot replace it.
       setCodexRuntimeResolveCacheForTests({
         runtime: { command: "codex", version: null, source: "environment" },
-        failures: cached.failures,
+        failures: [],
       }, deps);
       const before = readFileSync(statePath, "utf8");
 
