@@ -5,6 +5,7 @@ import { delimiter, dirname, isAbsolute, join } from "node:path";
 import { tmpdir } from "node:os";
 import type { OcxConfig } from "../../src/types";
 import type { Desktop3pModelEntry } from "../../src/claude/desktop-3p";
+import { NATIVE_OPENAI_MODELS } from "../../src/codex/catalog/native-models";
 import { repoPath, fixturePath } from "../helpers/repo-root";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 import { SPAWN_BUDGET_MS } from "../helpers/test-budget";
@@ -195,6 +196,9 @@ for (const storedProfile of [true, false]) {
       defaultProvider: "decoy", codexAutoStart: false, syncResumeHistory: false,
       clientIntegrations: { codex: false, grok: false, "claude-desktop": false },
       providers: { chosen: provider(chosen, "model-target"), decoy: provider(decoy, "model-decoy") },
+      // Keep one native candidate: background runtime discovery may reorder the native roster
+      // between snapshot and apply, but this case tests hub IDs rather than native priority.
+      disabledModels: NATIVE_OPENAI_MODELS.filter(id => id !== "gpt-5.5"),
       subagentModels: ["decoy/model-decoy", "chosen/model-target"],
       claudeCode: {
         enabled: true, nativePassthrough: false, desktopNativeModels: true,

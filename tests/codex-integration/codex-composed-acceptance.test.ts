@@ -239,6 +239,11 @@ class Fixture {
       if (existsSync(path)) throw new Error(`lock preflight found pre-existing case path: ${path}`);
     }
     writeFileSync(join(this.codex, "config.toml"), 'model = "gpt-5"\n');
+    // PATH isolation cannot hide fixed install roots. A harmless launcher keeps the host's
+    // Codex from creating its own tmp artifacts during background bundled-catalog discovery.
+    writeFileSync(join(this.provider, process.platform === "win32" ? "codex.cmd" : "codex"),
+      process.platform === "win32" ? "@echo off\r\necho codex-cli 0.145.0\r\n"
+        : "#!/bin/sh\nprintf '%s\\n' 'codex-cli 0.145.0'\n", { mode: 0o755 });
     const serviceHome = claimOwnedServiceHome(this.codex, this.ocx, this.homeA);
     this.serviceManagerEnv = serviceHome.env;
     this.serviceManagerPreloadPath = serviceHome.preloadPath;
@@ -261,6 +266,7 @@ class Fixture {
       // installation on every platform instead of reporting not_installed.
       GROK_HOME: join(home, ".grok"),
       CODEX_HOME: this.codex,
+      CODEX_CLI_PATH: join(this.provider, process.platform === "win32" ? "codex.cmd" : "codex"),
       OPENCODEX_HOME: this.ocx,
       XDG_RUNTIME_DIR: this.runtime,
       OPENCODEX_API_AUTH_TOKEN: this.dataToken,
