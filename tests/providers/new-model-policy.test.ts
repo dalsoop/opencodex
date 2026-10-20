@@ -88,6 +88,37 @@ describe("new-model policy", () => {
     expect(config.modelDiscovery!.knownModels!.vendor.visibilityInitialized).toBe(true);
   });
 
+  test.each(["active", "retired"] as const)("a switch for a missing %s model controls legacy initialization", state => {
+    const models = Array.from({ length: 600 }, (_, i) => ({ provider: "vendor", id: `model-${i}` }));
+    const config = { port: 10100, defaultProvider: "vendor", providers: { vendor: { defaultModel: "model-3" } },
+      disabledModels: ["vendor/missing"], modelDiscovery: { knownModels: { vendor: {
+        ids: [...models.map(row => row.id), ...(state === "active" ? ["missing"] : [])],
+        removed: state === "retired" ? ["missing"] : [], updatedAt: now,
+      } } },
+    } as Parameters<typeof reconcileSuccessfulModelDiscoveries>[0]["config"];
+    reconcileSuccessfulModelDiscoveries({ config, models, authoritativeProviders: ["vendor"], now, mode: "discovery" });
+    expect(config.disabledModels).toHaveLength(state === "active" ? 1 : 600);
+    expect(config.disabledModels).toContain("vendor/missing");
+    expect(config.disabledModels).not.toContain("vendor/model-3");
+    expect(config.modelDiscovery!.knownModels!.vendor.visibilityInitialized).toBe(true);
+  });
+
+  test("a legacy Antigravity wire-tier switch survives normalization before initialization", () => {
+    const provider = "google-antigravity";
+    const base = "claude-opus-5-5";
+    const models = [...Array.from({ length: 20 }, (_, i) => ({ provider, id: `model-${i}` })), {
+      provider, id: base, antigravityEffortWireModelIds: { low: `${base}-low`, medium: `${base}-medium`, high: `${base}-high` },
+    }];
+    const config = { port: 10100, defaultProvider: provider, providers: { [provider]: { defaultModel: "model-3" } },
+      disabledModels: [`${provider}/${base}-high`], modelDiscovery: { knownModels: { [provider]: {
+        ids: [...models.slice(0, 20).map(row => row.id), `${base}-low`, `${base}-high`], removed: [], updatedAt: now,
+      } } },
+    } as Parameters<typeof reconcileSuccessfulModelDiscoveries>[0]["config"];
+    reconcileSuccessfulModelDiscoveries({ config, models, authoritativeProviders: [provider], now });
+    expect(config.disabledModels).toEqual([`${provider}/${base}-high`]);
+    expect(config.modelDiscovery!.knownModels![provider].visibilityInitialized).toBe(true);
+  });
+
   test("bootstraps without hiding the existing catalog", () => {
     const r = applyNewModelPolicy({ provider: "openrouter", discoveredIds: ["a", "b"], policy: "off", now });
     expect(r.newIds).toEqual([]); expect(r.slugsToDisable).toEqual([]); expect(r.nextBaseline.ids).toEqual(["a", "b"]);
