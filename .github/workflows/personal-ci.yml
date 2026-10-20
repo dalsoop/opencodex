@@ -27,6 +27,8 @@ jobs:
           role: test-runner
       - run: bun install --frozen-lockfile
       - run: bun run typecheck
+      - name: Typecheck personal installer
+        run: bun x tsc --ignoreConfig --noEmit --target esnext --module esnext --moduleResolution bundler --skipLibCheck --types bun scripts/personal-install.ts
       - run: bun run structure:check
       - run: bun run privacy:scan
       - run: bun run build:gui

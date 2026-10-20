@@ -100,7 +100,7 @@ async function main(): Promise<void> {
       writeFileSync(`${launcher}.next`, personalLauncher(root, bun), { mode: 0o755 });
       renameSync(`${launcher}.next`, launcher);
     });
-    console.log(`Installed ${sha}. Use ${launcher}; update with ocx update.`);
+    console.log(`Installed ${sha}. Use ${join(root, "bin", "ocx")}; update with ocx update.`);
   } catch (error) {
     // Pointer rollback happened before reinstalling the previous service definition.
     if (service && previous) {
