@@ -333,6 +333,7 @@ describe("ocx opencode proxy model catalog", () => {
           baseUrl: "https://proxyenv.test/v1",
           apiKey: `\${${ENV_KEY}}`,
           models: ["static-fallback"],
+          selectedModels: ["static-fallback", "live-via-proxy-env"],
           // Discovery runs on the pinned transport; hand it back the stub above.
           fetch: ((input: RequestInfo | URL, init?: RequestInit) => globalThis.fetch(input, init)) as typeof fetch,
         },

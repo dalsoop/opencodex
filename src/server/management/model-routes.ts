@@ -227,7 +227,7 @@ export async function handleModelRoutes(ctx: ManagementContext): Promise<Respons
       name, baseline.ids.length,
     ]));
     return jsonResponse({
-      policy: config.modelDiscovery?.newModelPolicy ?? "on", providers, recentArrivals, baselineCounts,
+      policy: config.modelDiscovery?.newModelPolicy ?? "off", providers, recentArrivals, baselineCounts,
     });
   }
 
@@ -1162,9 +1162,9 @@ export async function handleModelRoutes(ctx: ManagementContext): Promise<Respons
       return jsonResponse({ error: "Initial model discovery is pending. Refresh the model list and retry.", code: "initial_model_selection_pending" }, 409);
     }
     if (mode === "all") {
-      // Same effect as today's empty-list PUT: no allowlist, no marker to reconcile.
+      // Keep explicit all-mode distinct from an unconfigured discovery default.
       delete target.selectedModels;
-      delete target.modelPreset;
+      target.modelPreset = { mode: "all" };
       persistConfig(config);
       return jsonResponse({ ok: true, provider, mode, selected: [], ...await convergeVisibleCatalogs() });
     }
@@ -1229,7 +1229,10 @@ export async function handleModelRoutes(ctx: ManagementContext): Promise<Respons
       : [];
     // Empty list clears the allowlist (provider reverts to exposing all models).
     if (models.length > 0) config.providers[provider].selectedModels = models;
-    else delete config.providers[provider].selectedModels;
+    else {
+      delete config.providers[provider].selectedModels;
+      config.providers[provider].modelPreset = { mode: "all" };
+    }
     // Divergence is detected at the WRITE path, not by diffing (#2465): a user edit while the
     // provider is in preset mode makes the selection theirs, and the proxy must never
     // re-materialize over it afterwards.

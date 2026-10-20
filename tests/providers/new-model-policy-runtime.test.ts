@@ -29,6 +29,23 @@ afterEach(() => {
   home.remove();
 });
 
+test("first discovery persists default-only visibility before publication", () => {
+  const initial = fixture();
+  delete initial.disabledModels;
+  delete initial.modelDiscovery;
+  delete initial.providers.vendor.newModelPolicy;
+  initial.providers.vendor.defaultModel = "a";
+  saveConfig(initial);
+  const config = loadConfig();
+  expect(complete(config)).toBe(true);
+  expect(loadConfig().disabledModels).toEqual(["vendor/b", "vendor/c"]);
+  const enabled = loadConfig();
+  enabled.disabledModels = ["vendor/c"];
+  saveConfig(enabled);
+  expect(complete(config)).toBe(true);
+  expect(config.disabledModels).toEqual(["vendor/c"]);
+});
+
 test("discovery persists arrival and disable together, then preserves a manual enable without rewriting", () => {
   saveConfig(fixture());
   const config = loadConfig();

@@ -142,3 +142,7 @@ Bu kuralların okuduğu sağlayıcı alanları için
 [Yapılandırma](/tr/reference/configuration/) sayfasına bakın.
 
 
+
+## Model discovery defaults
+
+`modelDiscovery.newModelPolicy` varsayılanı `"off"` değeridir; alan yoksa da geçerlidir. İlk başarılı canlı keşifte yalnızca ayarlanan `defaultModel` görünür; eşleşme yoksa Models bölümünde gereken modelleri açın. Seçimler, anahtarlar, küçük mevcut temel listeler ve statik kataloglar korunur. Seçim yapılmamış en az 20 modellik eski canlı katalog bir kez varsayılan modele daraltılır; sonraki elle değişiklikler sıfırlanmaz. Yeni modeller elle açılana kadar gizlidir. Açık `"on"` otomatik yayıma izin verir.

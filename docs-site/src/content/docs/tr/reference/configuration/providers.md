@@ -117,7 +117,7 @@ alanlı seçilmiş kimlikleri yalın kimliklere yeniden yazar.
 | `defaultModel?` | `string` | Bu sağlayıcı açık bir model olmadan seçildiğinde kullanılan model. |
 | `models?` | `string[]` | Başlangıç/geri dönüş model listesi. `liveModels: false` iken boş olmayan `models` listesini `retainModels` izler; `models` boşsa veya atlanmışsa önce yapılandırılmış `defaultModel`, sonra `retainModels` kullanılır. Yinelenen kimliklerin yalnızca ilk geçtiği konum korunur. |
 | `liveModels?` | `boolean` | Başlatmada/senkronizasyonda canlı kataloğu getirin (varsayılan `true`). Özel sağlayıcılar `${baseUrl}/models` kullanır; yerleşikler bir kayıt defteri URL'si ve filtresi kullanabilir. |
-| `selectedModels?` | `string[]` | Keşiften sonra katalog izin listesi. Boş olmaması yalnızca bu kimlikleri gösterir; boş veya atlanmış olması keşfedilen tüm modelleri gösterir. |
+| `selectedModels?` | `string[]` | Keşif sonrası izin listesi. Doluysa yalnızca bu kimliklere izin verir; boş veya eksikse ek izin listesi uygulanmaz. Keşif ilkesi ve `disabledModels` geçerlidir. |
 | `contextWindow?` | `number` | Yukarı akış meta verileri olmadığında sağlayıcı genelinde bağlam geri dönüşü; aksi takdirde daha küçük canlı meta verileri koruyan bir sınır. Modeller kontrol paneli bunu `providerContextCaps` alanından ayrı olarak gösterir. |
 | `modelContextWindows?` | `Record<string, number>` | Model başına bağlam geri dönüşleri/sınırları. Bunlar `contextWindow`'u geçersiz kılar: bilinmeyen bir pencere yapılandırılmış değeri kullanırken, daha küçük canlı meta veriler yetkili kalır. |
 | `inferContextWindow?` | `boolean` | Yalnızca özel sağlayıcılar, varsayılan kapalı. `true`, eksik pencereyi yerleşik model meta verisinden doldurur; bu bir tahmindir, aracının doğrulanmış kapasitesi değildir. |

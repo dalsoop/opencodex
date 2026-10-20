@@ -15,11 +15,11 @@ import { removeTreeWithRetry } from "../helpers/remove-tree";
 
 const ids = ["anthropic/claude-opus-5", "openai/gpt-5.6-sol"];
 const operations = [
-  { path: "/api/model-presets", input: { mode: "all" }, selected: undefined, mode: undefined },
+  { path: "/api/model-presets", input: { mode: "all" }, selected: undefined, mode: "all" },
   { path: "/api/model-presets", input: { mode: "custom" }, selected: [ids[0]], mode: "custom" },
   { path: "/api/model-presets", input: { mode: "preset" }, selected: ids, mode: "preset" },
   { path: "/api/selected-models", input: { models: [ids[1]] }, selected: [ids[1]], mode: "custom" },
-  { path: "/api/selected-models", input: { models: [] }, selected: undefined, mode: "custom" },
+  { path: "/api/selected-models", input: { models: [] }, selected: undefined, mode: "all" },
 ] as const;
 let home: string;
 let previousHome: string | undefined;

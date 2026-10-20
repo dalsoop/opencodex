@@ -35,6 +35,8 @@ function raceConfig(): OcxConfig {
     port: 10100,
     hostname: "127.0.0.1",
     defaultProvider: "alpha",
+    // This suite exercises changing discovery snapshots, with visibility explicitly opted in.
+    modelDiscovery: { newModelPolicy: "on" },
     providers: {
       alpha: { adapter: "openai-chat", baseUrl: ALPHA_HOST, models: [] },
       beta: { adapter: "openai-chat", baseUrl: BETA_HOST, models: [] },
