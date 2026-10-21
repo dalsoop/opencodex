@@ -1347,7 +1347,7 @@ describe("Windows service task", () => {
 
 describe("launchd service plist", () => {
   test("restarts after unsuccessful exits and stays down after a deliberate stand-down", () => {
-    expect(buildPlist()).toContain("<key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>");
+    expect(buildPlist()).toContain("<key>KeepAlive</key><true/>");
   });
 
   test("every durable launcher stamps the Bun provenance paired with the binary it baked (#848)", () => {

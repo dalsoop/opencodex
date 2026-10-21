@@ -150,7 +150,7 @@ describe("the managers restart a proxy the sentinel terminates", () => {
     const wrapper = readFileSync(repoPath("src", "service", "windows-taskxml.ts"), "utf8");
     expect(wrapper).toContain("goto stopped");
     expect(wrapper).toContain('"goto loop"');
-    expect(readFileSync(repoPath("src", "service", "launchd.ts"), "utf8")).toContain("<key>SuccessfulExit</key><false/>");
+    expect(readFileSync(repoPath("src", "service", "launchd.ts"), "utf8")).toContain("<key>KeepAlive</key><true/>");
     // SIGKILL, not SIGTERM: systemd treats a SIGTERM death as clean and would not restart.
     expect(readFileSync(repoPath("src", "service", "systemd.ts"), "utf8")).toContain("Restart=on-failure");
     expect(readFileSync(repoPath("src", "lib", "winsw.ts"), "utf8")).toContain('<onfailure action="restart"');
