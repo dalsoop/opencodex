@@ -21,6 +21,12 @@ exec node ${current}/bin/ocx.mjs "$@"
 `;
 }
 
+/** The receipt-backed CLI stop completes shared teardown before replacing a service. */
+export async function refreshPersonalService(run: (args: string[]) => Promise<unknown>): Promise<void> {
+  await run(["stop"]);
+  await run(["service", "install"]);
+}
+
 /** Switch only after preparation; restore the previous pointer on activation failure. */
 export async function activatePersonalRelease(root: string, release: string, activate: () => Promise<void>): Promise<void> {
   const current = join(root, "current");
@@ -92,7 +98,7 @@ async function main(): Promise<void> {
     const current = join(root, "current");
     previous = existsSync(current) ? resolve(root, readlinkSync(current)) : undefined;
     await activatePersonalRelease(root, release, async () => {
-      if (service) await run(cli(release, "service", "install"));
+      if (service) await refreshPersonalService(args => run(cli(release, ...args)));
       if (service) writeFileSync(join(root, "manage-service"), "", { mode: 0o600 });
       const bin = join(root, "bin");
       mkdirSync(bin, { recursive: true });
@@ -105,7 +111,7 @@ async function main(): Promise<void> {
   } catch (error) {
     // Pointer rollback happened before reinstalling the previous service definition.
     if (service && previous) {
-      try { await run(cli(previous, "service", "install")); }
+      try { await refreshPersonalService(args => run(cli(previous!, ...args))); }
       catch { console.error("Previous service recovery failed; run its service install command."); }
     }
     throw error;

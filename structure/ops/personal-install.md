@@ -6,6 +6,8 @@ Its managed launcher intercepts updates; source-layout runtime detection prevent
 registry replacement. Activation restores the old pointer on failure and attempts
 service recovery. `tests/ci-workflows/install-scripts.test.ts` exercises rollback and
 shell argument preservation. See `PERSONAL.md` for installation and recovery.
+Service replacement first runs the receipt-backed CLI stop; a refusal prevents
+installation. Recovery uses the same stop-before-install sequence.
 
 `.github/workflows/personal-ci.yml` validates the full Bun suite and docs on our main
 and integration branch with read-only permissions and no publishing credentials.

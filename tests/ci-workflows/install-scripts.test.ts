@@ -14,7 +14,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { normalizePackageModes } from "../../scripts/prepare-package";
-import { activatePersonalRelease, personalLauncher } from "../../scripts/personal-install";
+import { activatePersonalRelease, personalLauncher, refreshPersonalService } from "../../scripts/personal-install";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 import { repoRoot as resolveRepoRoot } from "../helpers/repo-root";
 
@@ -54,6 +54,18 @@ async function readText(path: string): Promise<string> {
 }
 
 describe("install scripts", () => {
+  test("personal service replacement requires a successful receipt-backed stop", async () => {
+    const calls: string[][] = [];
+    await expect(refreshPersonalService(async args => {
+      calls.push(args);
+      throw new Error("teardown refused");
+    })).rejects.toThrow("teardown refused");
+    expect(calls).toEqual([["stop"]]);
+    calls.length = 0;
+    await refreshPersonalService(async args => { calls.push(args); });
+    expect(calls).toEqual([["stop"], ["service", "install"]]);
+  });
+
   test.skipIf(process.platform === "win32")("personal install keeps the previous release on activation failure", async () => {
     const fixture = mkdtempSync(join(tmpdir(), "ocx-personal-"));
     try {
