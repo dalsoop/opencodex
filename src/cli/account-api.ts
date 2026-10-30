@@ -17,6 +17,7 @@ import { projectAccountHealth } from "./account-next-actions";
 import type { OAuthHealthLabel } from "../oauth/health";
 
 import { accountPauseDetailsSchema } from "../config/schema/account-auto-pause";
+import { projectChatgptSubscription, type ChatgptSubscription } from "../codex/plan";
 export type AccountType = "codex" | "oauth" | "api-key";
 
 export interface AccountRow {
@@ -30,6 +31,7 @@ export interface AccountRow {
    * an absent key means the row's surface does not carry a tier at all (#3777).
    */
   plan?: string | null;
+  subscription?: ChatgptSubscription;
   masked?: string;
   active: boolean;
   needsReauth?: boolean;
@@ -332,6 +334,7 @@ interface CodexAccountDto {
   alias?: string;
   email?: string;
   plan?: string;
+  subscription?: unknown;
   isMain?: boolean;
   needsReauth?: boolean;
   selectionExcludedReason?: "plan_excluded";
@@ -404,6 +407,7 @@ export async function fetchCodexRows(
     label: a.alias ?? a.plan ?? a.email,
     email: a.email,
     plan: a.plan,
+    subscription: projectChatgptSubscription(a.subscription),
     active: a.id === activeId,
     needsReauth: a.needsReauth,
     ...projectAccountHealth(a, "openai", a.id),

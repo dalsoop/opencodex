@@ -3,7 +3,7 @@
 How OpenAI accounts are migrated, identified, and rotated once the account modes in
 [OpenAI provider account modes](openai-tiers.md) are configured: wire identity, store concurrency,
 pool plan exclusions and ordering, quota observations, and account-bound thread and file
-retention.
+retention. `src/codex/plan.ts` decodes only namespaced `chatgpt_subscription_active_start`, `chatgpt_subscription_active_until`, and `chatgpt_subscription_last_checked` with the plan JWT decoder and ID-before-access precedence into optional public `subscription: {activeStart, activeUntil, lastChecked}`. Strings pass through unchanged; absent/non-string values become null; no claims means no object. These are display-only, possibly stale dates. `src/codex/auth-api/account-list.ts` reuses the pool credential already read for the DTO and the main identity/credits token read (`src/codex/auth-collision.ts`), with no new credential source or date-triggered refresh. Cached main-account metadata must match the stored token's observed account identity before attaching dates; a cold empty row needs no cached identity. Remote Link passive responses include dates even from expired tokens; `src/cli/account-api.ts` whitelists them with or without quota output. Tokens and unrelated claims never cross either projection. Coverage: `tests/codex-integration/codex-plan.test.ts`, `tests/server/link-management-relay.test.ts`, `tests/cli/cli-account-subscription.test.ts`.
 
 ## Migration and restore
 

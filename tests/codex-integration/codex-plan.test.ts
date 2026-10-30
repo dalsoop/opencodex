@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { saveCodexAccountCredential } from "../../src/codex/account-store";
 import { getMainAccountPlan, setMainAccountPlan } from "../../src/codex/main-account";
-import { extractChatgptPlanType } from "../../src/codex/plan";
+import { extractChatgptPlanType, extractChatgptSubscription } from "../../src/codex/plan";
 import {
   reconcileCodexPlansFromTokens,
   resetJwtPlanNotesForTests,
@@ -65,6 +65,53 @@ describe("extractChatgptPlanType", () => {
 
   test("ignores non-JWT access tokens", () => {
     expect(extractChatgptPlanType(undefined, "access-pool-1")).toBeUndefined();
+  });
+});
+
+describe("extractChatgptSubscription", () => {
+  function jwt(claims: Record<string, unknown>): string {
+    return `e30.${Buffer.from(JSON.stringify(claims)).toString("base64url")}.synthetic`;
+  }
+  const dates = {
+    chatgpt_subscription_active_start: "2026-09-18T17:15:31+00:00",
+    chatgpt_subscription_active_until: "2026-10-18T17:15:31+00:00",
+    chatgpt_subscription_last_checked: "2026-10-01T12:34:56.000Z",
+  };
+
+  test("passes only the three namespaced dates through unchanged, even in an expired JWT", () => {
+    const token = jwt({ exp: 1, secret: "synthetic-private-claim", "https://api.openai.com/auth": {
+      ...dates, chatgpt_plan_type: "plus", private_claim: "synthetic-private-claim",
+    } });
+    expect(extractChatgptSubscription(undefined, token)).toEqual({
+      activeStart: dates.chatgpt_subscription_active_start,
+      activeUntil: dates.chatgpt_subscription_active_until,
+      lastChecked: dates.chatgpt_subscription_last_checked,
+    });
+  });
+
+  test("omits absent claims, invalid tokens and non-object namespaces", () => {
+    for (const token of [undefined, "not-a-jwt", jwt({}), jwt(dates), jwt({ "https://api.openai.com/auth": "invalid" })]) {
+      expect(extractChatgptSubscription(token)).toBeUndefined();
+    }
+  });
+
+  test("fills absent and non-string fields with null without exposing objects", () => {
+    expect(extractChatgptSubscription(jwt({ "https://api.openai.com/auth": {
+      chatgpt_subscription_active_until: dates.chatgpt_subscription_active_until,
+    } }))).toEqual({ activeStart: null, activeUntil: dates.chatgpt_subscription_active_until, lastChecked: null });
+    expect(extractChatgptSubscription(jwt({ "https://api.openai.com/auth": {
+      chatgpt_subscription_active_start: null,
+      chatgpt_subscription_active_until: { secret: "synthetic-private-claim" },
+      chatgpt_subscription_last_checked: 123,
+    } }))).toEqual({ activeStart: null, activeUntil: null, lastChecked: null });
+  });
+
+  test("uses ID-token precedence and falls back to the access token when dates are absent", () => {
+    const id = jwt({ "https://api.openai.com/auth": { chatgpt_subscription_active_until: null } });
+    const access = jwt({ "https://api.openai.com/auth": dates });
+    expect(extractChatgptSubscription(id, access)).toEqual({ activeStart: null, activeUntil: null, lastChecked: null });
+    expect(extractChatgptSubscription(jwt({}), access)).toEqual(extractChatgptSubscription(access));
+    expect(extractChatgptSubscription("invalid", access)).toEqual(extractChatgptSubscription(access));
   });
 });
 
