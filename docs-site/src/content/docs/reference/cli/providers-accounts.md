@@ -697,6 +697,25 @@ Codex rows preserve the server's boolean `creditsAfterLimit` in list/current JSO
 human rows show `paid-credits: on` only when permission is enabled. These reads do
 not change paid-credit permission.
 
+OpenAI ChatGPT rows in `--json`, with or without `--quota`, optionally include:
+
+```json
+{"provider":"openai","id":"<redacted>","subscription":{"activeStart":"2026-09-18T17:15:31+00:00","activeUntil":"2026-10-18T17:15:31+00:00","lastChecked":null}}
+```
+
+`activeStart`, `activeUntil` (the subscription end/next billing date), and `lastChecked`
+are copied unchanged from the stored token's `https://api.openai.com/auth` claims
+`chatgpt_subscription_active_start`, `chatgpt_subscription_active_until`, and
+`chatgpt_subscription_last_checked`. Missing or non-string values are `null`;
+if all three claims are absent, `subscription` is omitted. These are display-only,
+possibly stale dates: reading them does not refresh credentials. Main-account ID-token
+claims take precedence over access-token claims, matching plan-token precedence;
+pool accounts use their stored access token. Remote Link Children retain these fields
+from the Home's passive account response; older Homes without them omit the object.
+If cached main-account metadata cannot be tied to the stored token's account identity,
+its dates are omitted rather than attributed to a different login.
+Tokens and unrelated JWT claims are never included.
+
 `--quota` adds a `QUOTA` column with each account's own usage, for providers that support a
 per-account probe (Anthropic, Kiro, Google Antigravity, and Devin today). It is opt-in because the proxy probes the upstream
 once per stored credential; the default listing stays a local read. `--refresh` bypasses the

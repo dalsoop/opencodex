@@ -2,6 +2,10 @@
 
 `src/cli/` contains the terminal management interface. Process ownership, startup, stop and service contracts remain in [Runtime](runtime.md); this document owns command discovery, help, management-client presentation and the generated operating reference.
 
+## Account subscription dates
+
+`src/cli/account-api.ts` retains the optional OpenAI `subscription` object in list/current JSON, independently of quota display. It whitelists only `activeStart`, `activeUntil`, and `lastChecked` as strings or null via `src/codex/plan.ts`; older servers without the object omit it. The [stored-token contract](providers/openai-accounts.md) also holds for Remote Link Home passive responses, which the Child transports without projecting account fields away. No CLI credential read or refresh is added.
+
 ## CLI readiness diagnostics
 
 `src/cli/status.ts` retains connection transport in the status JSON. Link clients identify Remote Link Home in the banner and connection line. They read supported Hub state through the identity-checked local Child without a CLI credential, retain owner-bound cache fallback on transport errors, and report standalone Home role absence without obsolete Hub cache. Hub clients retain their existing remote provider and login report.

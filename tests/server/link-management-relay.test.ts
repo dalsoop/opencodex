@@ -269,6 +269,70 @@ describe("Remote Link management relay on the Home", () => {
     expect(await keys.text()).not.toContain(PROVIDER_SECRET);
   });
 
+  test("relays stored subscription dates for main and pool without refreshing expired tokens", async () => {
+    const jwt = (claims: Record<string, unknown>) => `e30.${Buffer.from(JSON.stringify({
+      exp: 1, "https://api.openai.com/auth": claims,
+    })).toString("base64url")}.synthetic`;
+    const claims = {
+      chatgpt_subscription_active_start: "2026-09-18T17:15:31+00:00",
+      chatgpt_subscription_active_until: "2026-10-18T17:15:31+00:00",
+      private_claim: "synthetic-private-claim",
+    };
+    const accessToken = jwt(claims);
+    saveCodexAccountCredential("pool-expired", {
+      accessToken, refreshToken: "synthetic-refresh-secret", expiresAt: 1, chatgptAccountId: "acct-pool-expired",
+    });
+    writeFileSync(join(codexHome!.path, "auth.json"), JSON.stringify({ tokens: {
+      access_token: accessToken, id_token: jwt({ chatgpt_subscription_last_checked: "2026-10-01T00:00:00Z" }),
+      account_id: "acct-main-subscription",
+    } }));
+    const before = durableState();
+    externalCalls = [];
+    passiveEffects = [];
+    const readRows = async () => {
+      const response = await get(await linkBase(), "/v1/link-management/api/codex-auth/accounts", LINKED_KEY);
+      expect(response.status).toBe(200);
+      const text = await response.text();
+      expect(text).not.toContain(accessToken);
+      expect(text).not.toContain("synthetic-refresh-secret");
+      expect(text).not.toContain("synthetic-private-claim");
+      return JSON.parse(text).accounts as Array<{ id: string; subscription?: unknown }>;
+    };
+    const rows = await readRows();
+    expect(rows.find(row => row.id === "__main__")?.subscription).toEqual({
+      activeStart: null, activeUntil: null, lastChecked: "2026-10-01T00:00:00Z",
+    });
+    expect(rows.find(row => row.id === "pool-expired")?.subscription).toEqual({
+      activeStart: claims.chatgpt_subscription_active_start, activeUntil: claims.chatgpt_subscription_active_until, lastChecked: null,
+    });
+    expect(durableState()).toEqual(before);
+    expect(externalCalls).toEqual([]);
+    expect(passiveEffects).toEqual([]);
+    // A passive read must not graft a replacement login's dates onto another account's cache.
+    const { observeMainQuotaIdentity, setMainAccountInfoCache } = await import("../../src/codex/main-account-cache");
+    observeMainQuotaIdentity("acct-previous-main");
+    setMainAccountInfoCache({ email: "previous@example.test", plan: "plus", quota: null, ts: Date.now() });
+    const beforeMismatch = durableState();
+    const mismatched = (await readRows()).find(row => row.id === "__main__");
+    expect(mismatched).not.toHaveProperty("subscription");
+    expect(durableState()).toEqual(beforeMismatch);
+    expect(externalCalls).toEqual([]);
+    // Once the existing lifecycle observes the same identity, its cached row may carry dates.
+    observeMainQuotaIdentity("acct-main-subscription");
+    setMainAccountInfoCache({ email: "current@example.test", plan: "plus", quota: null, ts: Date.now() });
+    expect((await readRows()).find(row => row.id === "__main__")?.subscription).toEqual({
+      activeStart: null, activeUntil: null, lastChecked: "2026-10-01T00:00:00Z",
+    });
+    // Replacing the stored JWT, not refreshing it, is enough to change the next passive result.
+    saveCodexAccountCredential("pool-expired", {
+      accessToken: jwt({ chatgpt_subscription_active_until: "2026-11-18T17:15:31+00:00" }),
+      refreshToken: "synthetic-refresh-secret", expiresAt: 1, chatgptAccountId: "acct-pool-expired",
+    });
+    expect((await readRows()).find(row => row.id === "pool-expired")?.subscription).toEqual({
+      activeStart: null, activeUntil: "2026-11-18T17:15:31+00:00", lastChecked: null,
+    });
+  });
+
   test("refuses writes, unlisted reads and refresh queries before a handler runs", async () => {
     const base = await linkBase();
     const refused: Array<[string, string]> = [
