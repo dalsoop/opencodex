@@ -21,6 +21,18 @@ before switching installations. Releases live under
 `~/.local/share/opencodex-personal/releases/<commit>`. It atomically switches
 `current`, restores the previous pointer if activation fails, and attempts to
 restore the previous service. Old releases remain available for recovery.
+
+Updates never run `ocx stop` or any other command that restores the Codex config.
+On macOS the launchd plist runs through `current`, and the installer restarts the
+service only with `launchctl kickstart -k gui/$(id -u)/com.opencodex.proxy`; a
+rollback uses the same kickstart. launchd keeps the definition it loaded, so a
+plist still pinned to one release needs a one-time reload, which the installer
+prints and leaves to you:
+`launchctl bootout gui/$(id -u)/com.opencodex.proxy`, then, once
+`launchctl print` no longer finds it,
+`launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.opencodex.proxy.plist`
+(or log out and back in). On Linux the installer runs `ocx service`, which
+repairs and restarts the systemd unit without restoring Codex.
 An interrupted install leaves `install.lock`; remove it only after confirming
 no installer is running. User configuration and credentials remain in their
 existing state directories. The source installation disables the npm updater;
