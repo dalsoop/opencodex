@@ -88,6 +88,40 @@ export function launchdPrintedPid(printed: string): number | null {
   return match ? Number(match[1]) : null;
 }
 
+/** The plist's `EnvironmentVariables`, XML-unescaped. */
+export function launchdEnvironment(definition: string): Record<string, string> {
+  const block = /<key>EnvironmentVariables<\/key>\s*<dict>([\s\S]*?)<\/dict>/.exec(definition)?.[1] ?? "";
+  const env: Record<string, string> = {};
+  for (const match of block.matchAll(/<key>([^<]*)<\/key>\s*<string>([^<]*)<\/string>/g)) {
+    env[xmlUnescape(match[1])] = xmlUnescape(match[2]);
+  }
+  return env;
+}
+
+/** src/codex/loopback-target.ts isWildcardHostname, kept in step by a parity test. */
+function isWildcardHostname(hostname: string): boolean {
+  const normalized = hostname.trim().toLowerCase().replace(/\.$/, "").replace(/^\[(.*)\]$/, "$1");
+  if (normalized === "*" || normalized === "0") return true;
+  if (/^(0+\.){3}0+$/.test(normalized)) return true;
+  return normalized.includes(":") && /^[0:]+$/.test(normalized);
+}
+
+/**
+ * Where the service answers `/healthz`: the configured bind host, as `reportServiceServing`
+ * probes it (src/server/proxy-liveness.ts probeHostname). 127.0.0.1 only for an absent or
+ * wildcard host: under a specific non-loopback host, 127.0.0.1 is the port-less loopback
+ * companion, whose route allowlist has no `/healthz`.
+ */
+export function personalHealthzUrl(hostname: string | undefined, port: number): string {
+  const trimmed = (hostname ?? "").trim();
+  const host = !trimmed || isWildcardHostname(trimmed)
+    ? "127.0.0.1"
+    : trimmed.startsWith("[") && trimmed.endsWith("]")
+      ? trimmed
+      : trimmed.includes(":") ? `[${trimmed}]` : trimmed;
+  return `http://${host}:${port}/healthz`;
+}
+
 export interface LaunchctlResult {
   ok: boolean;
   stdout: string;
@@ -107,8 +141,13 @@ export interface PersonalServiceDeps {
   launchctl: (args: string[]) => LaunchctlResult;
   /** Runs `src/cli/index.ts` of the given release. */
   cli: (release: string, args: string[]) => Promise<unknown>;
-  /** GET `http://127.0.0.1:<port>/healthz`; resolves with the parsed body or rejects. */
-  fetchHealth: (port: number) => Promise<unknown>;
+  /**
+   * The configured `hostname`, read by `release`'s own `loadConfig()` under the service's
+   * environment (`OPENCODEX_HOME` from the plist), never this process's.
+   */
+  serviceHostname: (release: string, env: Record<string, string>) => Promise<string | undefined>;
+  /** GET `url` with `release`'s direct local HTTP client; resolves with the parsed body or rejects. */
+  fetchHealth: (release: string, url: string) => Promise<unknown>;
   sleep: (ms: number) => Promise<void>;
   now: () => number;
   /** How long a kickstarted job has to show a new pid and answer /healthz. */
@@ -119,9 +158,9 @@ export interface PersonalServiceDeps {
 /** What a refresh did to the running service, recorded BEFORE it acts so rollback can undo it. */
 export interface PersonalServiceProgress {
   action?: "kickstart" | "cli";
-  /** The launchd pid the kickstart replaced, and the port its health is read on. */
+  /** The launchd pid the kickstart replaced, and where its health is read. */
   replacedPid?: number | null;
-  port?: number;
+  healthUrl?: string;
 }
 
 function launchdTarget(deps: PersonalServiceDeps): string {
@@ -146,9 +185,15 @@ function writeStablePlist(deps: PersonalServiceDeps, definition: string): string
 
 /**
  * `launchctl kickstart -k`, then proof that a NEW process serves: launchd reports a pid other
- * than the one replaced, and that pid answers `/healthz` on the baked port.
+ * than the one replaced, and `/healthz` at the configured host answers with THAT pid (the
+ * plist `exec`s Bun, so the server is launchd's process).
  */
-async function kickstartAndVerify(deps: PersonalServiceDeps, replacedPid: number | null, port: number): Promise<void> {
+async function kickstartAndVerify(
+  deps: PersonalServiceDeps,
+  release: string,
+  replacedPid: number | null,
+  healthUrl: string,
+): Promise<void> {
   const target = launchdTarget(deps);
   const kicked = deps.launchctl(["kickstart", "-k", target]);
   if (!kicked.ok) throw new Error(`launchctl kickstart -k ${target} failed: ${kicked.stderr.trim() || "no detail"}`);
@@ -159,14 +204,11 @@ async function kickstartAndVerify(deps: PersonalServiceDeps, replacedPid: number
     const pid = printed.ok ? launchdPrintedPid(printed.stdout) : null;
     if (pid !== null && pid !== replacedPid) {
       try {
-        const body = await deps.fetchHealth(port) as { status?: unknown; service?: unknown; pid?: unknown } | null;
-        // The answering pid must not be the replaced one. It is normally launchd's pid (the
-        // plist `exec`s Bun), but equality is not required so a supervising wrapper cannot
-        // fail a healthy update into a rollback.
-        if (body?.service === "opencodex" && body.status === "ok" && body.pid !== replacedPid) return;
-        last = `pid ${pid} answered /healthz on port ${port} with ${JSON.stringify(body)}`;
+        const body = await deps.fetchHealth(release, healthUrl) as { status?: unknown; service?: unknown; pid?: unknown } | null;
+        if (body?.service === "opencodex" && body.status === "ok" && body.pid === pid) return;
+        last = `${healthUrl} answered ${JSON.stringify(body)} while launchd runs pid ${pid}`;
       } catch (error) {
-        last = `pid ${pid} did not answer /healthz on port ${port}: ${error instanceof Error ? error.message : String(error)}`;
+        last = `${healthUrl} did not answer for pid ${pid}: ${error instanceof Error ? error.message : String(error)}`;
       }
     }
     if (deps.now() >= deadline) {
@@ -258,10 +300,16 @@ export async function refreshPersonalService(
       + reloadSteps(deps),
     );
   }
+  // Resolved before the restart, so an unreadable config restarts nothing.
+  const serviceEnv = launchdEnvironment(installed);
+  const healthUrl = personalHealthzUrl(
+    await deps.serviceHostname(release, serviceEnv.OPENCODEX_HOME ? { OPENCODEX_HOME: serviceEnv.OPENCODEX_HOME } : {}),
+    port,
+  );
   progress.action = "kickstart";
   progress.replacedPid = launchdPrintedPid(printed.stdout);
-  progress.port = port;
-  await kickstartAndVerify(deps, progress.replacedPid, port);
+  progress.healthUrl = healthUrl;
+  await kickstartAndVerify(deps, release, progress.replacedPid, healthUrl);
 }
 
 /**
@@ -277,7 +325,7 @@ export async function restorePersonalService(
   if (progress.action === "kickstart") {
     const target = launchdTarget(deps);
     const printed = deps.launchctl(["print", target]);
-    await kickstartAndVerify(deps, printed.ok ? launchdPrintedPid(printed.stdout) : null, progress.port!);
+    await kickstartAndVerify(deps, previous, printed.ok ? launchdPrintedPid(printed.stdout) : null, progress.healthUrl!);
   } else if (progress.action === "cli" && deps.platform !== "darwin") {
     await deps.cli(previous, ["service"]);
   } else if (progress.action === "cli") {
@@ -341,8 +389,8 @@ async function main(): Promise<void> {
   }
   const root = join(homedir(), ".local", "share", "opencodex-personal");
   const bun = process.execPath;
-  async function run(argv: string[], cwd?: string, capture = false): Promise<string> {
-    const child = Bun.spawn(argv, { cwd, stdin: "ignore", stdout: capture ? "pipe" : "inherit", stderr: "inherit" });
+  async function run(argv: string[], cwd?: string, capture = false, env?: Record<string, string | undefined>): Promise<string> {
+    const child = Bun.spawn(argv, { cwd, env, stdin: "ignore", stdout: capture ? "pipe" : "inherit", stderr: "inherit" });
     const output = capture ? await new Response(child.stdout).text() : "";
     if (await child.exited !== 0) throw new Error(`Command failed: ${argv[0]}`);
     return output.trim();
@@ -378,8 +426,24 @@ async function main(): Promise<void> {
       return { ok: child.exitCode === 0, stdout: child.stdout.toString(), stderr: child.stderr.toString() };
     },
     cli: (release, tail) => run(cli(release, ...tail)),
-    fetchHealth: async port => {
-      const response = await fetch(`http://127.0.0.1:${port}/healthz`, { signal: AbortSignal.timeout(2000) });
+    serviceHostname: async (release, env) => {
+      const marker = "__OCX_PERSONAL_HOSTNAME__=";
+      const config = JSON.stringify(join(release, "src", "config.ts"));
+      const script = `const { loadConfig } = await import(${config});\n`
+        + `await Bun.write(Bun.stdout, "\\n${marker}" + JSON.stringify(loadConfig().hostname ?? null) + "\\n");\n`
+        + "process.exit(0);";
+      const output = await run([bun, "-e", script], release, true, { ...process.env, ...env });
+      const line = output.split("\n").reverse().find(entry => entry.startsWith(marker));
+      if (!line) throw new Error("Could not read the service hostname from its configuration.");
+      const hostname: unknown = JSON.parse(line.slice(marker.length));
+      return typeof hostname === "string" ? hostname : undefined;
+    },
+    fetchHealth: async (release, url) => {
+      // The release's raw-socket client: like proxyIdentityAt, never routed through HTTP(S)_PROXY.
+      const { directLocalHttpFetch } = await import(join(release, "src", "server", "direct-local-http.ts")) as {
+        directLocalHttpFetch: (input: string, init?: RequestInit) => Promise<Response>;
+      };
+      const response = await directLocalHttpFetch(url, { signal: AbortSignal.timeout(2000) });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       return await response.json();
     },

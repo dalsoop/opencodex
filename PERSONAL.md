@@ -25,9 +25,11 @@ restore the previous service. Old releases remain available for recovery.
 Updates never run `ocx stop` or any other command that restores the Codex config.
 On macOS the launchd plist runs through `current`, and the installer restarts the
 service only with `launchctl kickstart -k gui/$(id -u)/com.opencodex.proxy`. It then
-waits up to 90 seconds for a new pid that answers `/healthz` on the plist's port
-(probed on 127.0.0.1); otherwise it restores `current` and kickstarts the previous
-release. launchd keeps the definition it loaded, so while a job is still pinned to
+waits up to 90 seconds until `/healthz` on the plist's port answers with the new
+pid launchd reports. It probes the configured `hostname`, read by the release's own
+config loader under the plist's `OPENCODEX_HOME`, and uses 127.0.0.1 only when that
+host is unset or a wildcard. On failure it restores `current` and kickstarts the
+previous release. launchd keeps the definition it loaded, so while a job is still pinned to
 one release the installer restarts nothing and prints a one-time reload:
 `launchctl bootout gui/$(id -u)/com.opencodex.proxy`, then, once `launchctl print`
 no longer finds it,

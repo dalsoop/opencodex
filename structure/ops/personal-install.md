@@ -9,7 +9,8 @@ shell argument preservation. See `PERSONAL.md` for installation and recovery.
 Service replacement never runs `ocx stop` or another Codex-restoring verb. On macOS
 the installer moves the plist onto the `current` pointer and restarts only with
 `launchctl kickstart -k`, after `launchctl print` proves launchd holds that stable
-definition, then requires a new pid answering `/healthz`. A release-pinned or unloaded
+definition, then requires `/healthz` on the configured host to answer with launchd's
+new pid. A release-pinned or unloaded
 job is left running with reload instructions; `ocx service install|repair` re-pin it.
 A first macOS service install needs explicit `--service`. Linux runs the bare
 `ocx service` repair. macOS rollback only kickstarts or prints steps; Linux repeats

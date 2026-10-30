@@ -18,7 +18,9 @@ import { normalizePackageModes } from "../../scripts/prepare-package";
 import {
   activatePersonalRelease,
   LAUNCHD_LABEL,
+  launchdEnvironment,
   launchdProgramCommand,
+  personalHealthzUrl,
   personalLauncher,
   refreshPersonalService,
   restorePersonalService,
@@ -27,6 +29,7 @@ import {
   type PersonalServiceDeps,
   type PersonalServiceProgress,
 } from "../../scripts/personal-install";
+import { probeHostname } from "../../src/server/proxy-liveness";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 import { repoRoot as resolveRepoRoot } from "../helpers/repo-root";
 
@@ -93,6 +96,7 @@ describe("install scripts", () => {
   <key>EnvironmentVariables</key>
   <dict>
     <key>OCX_SERVICE</key><string>1</string>
+    <key>OPENCODEX_HOME</key><string>/Users/example/.opencodex-hub</string>
     <key>OCX_BUN_RUNTIME_PATH</key><string>${prefix}/node_modules/bun/bin/bun.exe</string>
     <key>PATH</key><string>/opt/elsewhere/releases/${"c".repeat(40)}/bin:/usr/bin:/bin</string>
   </dict>
@@ -115,6 +119,10 @@ describe("install scripts", () => {
       kickstartOk?: boolean;
       healthy?: boolean;
       installRequested?: boolean;
+      /** The configured bind host; 127.0.0.1 then only serves the loopback companion. */
+      hostname?: string;
+      /** A different process answering /healthz. */
+      healthPid?: number;
     } = {}) {
       const platform = options.platform ?? "darwin";
       const files = new Map<string, string>();
@@ -123,6 +131,8 @@ describe("install scripts", () => {
       const cli: { release: string; args: string[] }[] = [];
       const effects: string[] = [];
       const logs: string[] = [];
+      const health: { release: string; url: string }[] = [];
+      const hostnameReads: { release: string; env: Record<string, string> }[] = [];
       let pid = 100;
       let clock = 0;
       const deps: PersonalServiceDeps = {
@@ -158,16 +168,24 @@ describe("install scripts", () => {
             files.set(plistPath, plistFor(release));
           }
         },
-        fetchHealth: async port => {
+        serviceHostname: async (release, env) => {
+          hostnameReads.push({ release, env });
+          return options.hostname;
+        },
+        fetchHealth: async (release, url) => {
+          health.push({ release, url });
           if (options.healthy === false) throw new Error("connection refused");
-          return { status: "ok", service: "opencodex", pid, port };
+          const servingHost = options.hostname ?? "127.0.0.1";
+          // The loopback companion of a specific-host bind allowlists routes; /healthz is not one.
+          if (!url.startsWith(`http://${servingHost}:10100/`)) throw new Error("HTTP 404");
+          return { status: "ok", service: "opencodex", pid: options.healthPid ?? pid, port: 10100 };
         },
         sleep: async ms => { clock += ms; },
         now: () => clock,
         healthTimeoutMs: 5000,
         log: message => { logs.push(message); },
       };
-      return { deps, files, launchctl, cli, effects, logs };
+      return { deps, files, launchctl, cli, effects, logs, health, hostnameReads };
     }
 
     test("only release-pinned paths move onto the current pointer", () => {
@@ -204,7 +222,9 @@ describe("install scripts", () => {
       expect(host.effects).toEqual([]);
       expect(host.launchctl).toEqual([["print", target], ["kickstart", "-k", target], ["print", target]]);
       expect(host.files.get(plistPath)).toBe(plistFor(`${root}/current`));
-      expect(progress).toEqual({ action: "kickstart", replacedPid: 100, port: 10100 });
+      expect(progress).toEqual({ action: "kickstart", replacedPid: 100, healthUrl: "http://127.0.0.1:10100/healthz" });
+      expect(host.hostnameReads).toEqual([{ release: newRelease, env: { OPENCODEX_HOME: "/Users/example/.opencodex-hub" } }]);
+      expect(host.health).toEqual([{ release: newRelease, url: "http://127.0.0.1:10100/healthz" }]);
 
       // Rollback after the pointer is restored: the same kickstart, never a stop or reload.
       await restorePersonalService(oldRelease, host.deps, progress);
@@ -216,13 +236,48 @@ describe("install scripts", () => {
     test("a kickstarted job that never answers /healthz fails the refresh", async () => {
       const host = fakeHost({ plist: plistFor(oldRelease), healthy: false });
       const progress: PersonalServiceProgress = {};
-      await expect(refreshPersonalService(newRelease, host.deps, progress)).rejects.toThrow("did not answer /healthz on port 10100");
+      await expect(refreshPersonalService(newRelease, host.deps, progress)).rejects.toThrow("http://127.0.0.1:10100/healthz did not answer for pid 101");
       // Rollback then kickstarts the previous release; nothing else.
       expect(progress.action).toBe("kickstart");
       await expect(restorePersonalService(oldRelease, host.deps, progress)).rejects.toThrow("did not serve");
       expect(host.launchctl.filter(args => args[0] !== "print")).toEqual([["kickstart", "-k", target], ["kickstart", "-k", target]]);
       expect(host.cli).toEqual([]);
       expect(host.effects).toEqual([]);
+    });
+
+    test("health is probed on the configured host, not the loopback companion", async () => {
+      const host = fakeHost({ plist: plistFor(oldRelease), hostname: "192.0.2.10" });
+      const progress: PersonalServiceProgress = {};
+      await refreshPersonalService(newRelease, host.deps, progress);
+      expect(host.health).toEqual([{ release: newRelease, url: "http://192.0.2.10:10100/healthz" }]);
+      // The same host verifies the rollback kickstart, read with the previous release's client.
+      await restorePersonalService(oldRelease, host.deps, progress);
+      expect(host.health.at(-1)).toEqual({ release: oldRelease, url: "http://192.0.2.10:10100/healthz" });
+
+      // 127.0.0.1 answers 404 under a specific bind, so probing it fails the update.
+      const loopback = fakeHost({ plist: plistFor(oldRelease), hostname: "192.0.2.10" });
+      loopback.deps.serviceHostname = async () => undefined;
+      await expect(refreshPersonalService(newRelease, loopback.deps)).rejects.toThrow("HTTP 404");
+    });
+
+    test("the probe host matches the CLI's probeHostname", () => {
+      for (const hostname of [undefined, "", "0.0.0.0", "::", "[::]", "*", "127.0.0.1", "192.0.2.10", "hub.example.test", "fd00::1", "[fd00::1]", "::1"]) {
+        expect(personalHealthzUrl(hostname, 10100)).toBe(`http://${probeHostname(hostname)}:10100/healthz`);
+      }
+      expect(personalHealthzUrl("fd00::1", 10100)).toBe("http://[fd00::1]:10100/healthz");
+      expect(launchdEnvironment(plistFor(oldRelease)).OPENCODEX_HOME).toBe("/Users/example/.opencodex-hub");
+    });
+
+    test("/healthz from a process other than launchd's fails the update", async () => {
+      const host = fakeHost({ plist: plistFor(oldRelease), healthPid: 4242 });
+      const progress: PersonalServiceProgress = {};
+      await expect(refreshPersonalService(newRelease, host.deps, progress)).rejects.toThrow("while launchd runs pid 101");
+      expect(progress.action).toBe("kickstart");
+
+      // Rollback verification demands launchd's own pid as well.
+      const unknown = fakeHost({ plist: plistFor(oldRelease), healthPid: 4242 });
+      await expect(restorePersonalService(oldRelease, unknown.deps, { action: "kickstart", replacedPid: null, healthUrl: "http://127.0.0.1:10100/healthz" }))
+        .rejects.toThrow("did not serve");
     });
 
     test("a release-pinned launchd job is left running instead of evicted", async () => {
