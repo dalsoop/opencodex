@@ -9,8 +9,12 @@ shell argument preservation. See `PERSONAL.md` for installation and recovery.
 Service replacement never runs `ocx stop` or another Codex-restoring verb. On macOS
 the installer moves the plist onto the `current` pointer and restarts only with
 `launchctl kickstart -k`, after `launchctl print` proves launchd holds that stable
-definition; a release-pinned job is left running with reload instructions. Linux runs
-the bare `ocx service` repair. Recovery repeats the same mechanism.
+definition, then requires a new pid answering `/healthz`. A release-pinned or unloaded
+job is left running with reload instructions; `ocx service install|repair` re-pin it.
+A first macOS service install needs explicit `--service`. Linux runs the bare
+`ocx service` repair. macOS rollback only kickstarts or prints steps; Linux repeats
+`ocx service`. Installations older than this change bootstrap once from a fresh clone,
+because `ocx update` runs the replaced release's installer.
 
 `.github/workflows/personal-ci.yml` validates the full Bun suite and docs on our main
 and integration branch with read-only permissions and no publishing credentials.

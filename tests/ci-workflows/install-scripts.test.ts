@@ -5,6 +5,7 @@ import {
   lstatSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   readlinkSync,
   statSync,
   symlinkSync,
@@ -22,6 +23,7 @@ import {
   refreshPersonalService,
   restorePersonalService,
   stablePersonalServiceDefinition,
+  writePrivateFileAtomic,
   type PersonalServiceDeps,
   type PersonalServiceProgress,
 } from "../../scripts/personal-install";
@@ -72,11 +74,11 @@ describe("install scripts", () => {
     const target = `gui/501/${LAUNCHD_LABEL}`;
     const xml = (value: string) => value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
       .replace(/"/g, "&quot;").replace(/'/g, "&apos;");
-    const commandFor = (prefix: string) => "if [ -f '/Users/example/.opencodex/service-token' ]; then "
-      + "OPENCODEX_API_AUTH_TOKEN=\"$(cat '/Users/example/.opencodex/service-token')\"; export OPENCODEX_API_AUTH_TOKEN; fi; "
-      + `exec '${prefix}/node_modules/bun/bin/bun.exe' '${prefix}/src/cli/index.ts' start --port 10100`;
+    const preamble = "if [ -f '/Users/example/.opencodex/service-token' ]; then "
+      + "OPENCODEX_API_AUTH_TOKEN=\"$(cat '/Users/example/.opencodex/service-token')\"; export OPENCODEX_API_AUTH_TOKEN; fi; ";
+    const commandFor = (prefix: string) => `${preamble}exec '${prefix}/node_modules/bun/bin/bun.exe' '${prefix}/src/cli/index.ts' start --port 10100`;
     // Same shape as src/service/launchd.ts buildPlist.
-    const plistFor = (prefix: string) => `<?xml version="1.0" encoding="UTF-8"?>
+    const plistFor = (prefix: string, command = commandFor(prefix)) => `<?xml version="1.0" encoding="UTF-8"?>
 <plist version="1.0">
 <dict>
   <key>Label</key><string>${LAUNCHD_LABEL}</string>
@@ -84,7 +86,7 @@ describe("install scripts", () => {
   <array>
     <string>/bin/sh</string>
     <string>-lc</string>
-    <string>${xml(commandFor(prefix))}</string>
+    <string>${xml(command)}</string>
   </array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
@@ -98,24 +100,37 @@ describe("install scripts", () => {
 </dict>
 </plist>
 `;
-    const printFor = (command: string) => `${target} = {\n\tstate = running\n\tprogram = /bin/sh\n\targuments = {\n\t\t/bin/sh\n\t\t-lc\n\t\t${command}\n\t}\n}\n`;
+    const printFor = (command: string, pid: number | null) => `${target} = {\n\tstate = ${pid ? "running" : "waiting"}\n`
+      + (pid ? `\tpid = ${pid}\n` : "") + `\tprogram = /bin/sh\n\targuments = {\n\t\t/bin/sh\n\t\t-lc\n\t\t${command}\n\t}\n}\n`;
 
+    /**
+     * A host whose CLI behaves like src/service: bare `service` with a plist is `repair`
+     * (installLaunchd: bootout + bootstrap), and `service install` is prepareServiceInstall
+     * (stop the manager and any standalone proxy) followed by the same bootout + bootstrap.
+     */
     function fakeHost(options: {
       platform?: NodeJS.Platform;
       plist?: string | null;
       live?: string | null;
       kickstartOk?: boolean;
+      healthy?: boolean;
+      installRequested?: boolean;
     } = {}) {
+      const platform = options.platform ?? "darwin";
       const files = new Map<string, string>();
       if (options.plist) files.set(plistPath, options.plist);
       const launchctl: string[][] = [];
       const cli: { release: string; args: string[] }[] = [];
+      const effects: string[] = [];
       const logs: string[] = [];
+      let pid = 100;
+      let clock = 0;
       const deps: PersonalServiceDeps = {
-        platform: options.platform ?? "darwin",
+        platform,
         roots: [root],
         plistPath,
         uid: 501,
+        installRequested: options.installRequested ?? false,
         readFile: path => files.get(path) ?? null,
         writeFile: (path, text) => { files.set(path, text); },
         launchctl: args => {
@@ -123,24 +138,37 @@ describe("install scripts", () => {
           if (args[0] === "print") {
             return options.live === null
               ? { ok: false, stdout: "", stderr: "Could not find service" }
-              : { ok: true, stdout: printFor(options.live ?? commandFor(`${root}/current`)), stderr: "" };
+              : { ok: true, stdout: printFor(options.live ?? commandFor(`${root}/current`), pid), stderr: "" };
           }
           if (args[0] === "kickstart") {
-            return options.kickstartOk === false ? { ok: false, stdout: "", stderr: "kickstart refused" } : { ok: true, stdout: "", stderr: "" };
+            if (options.kickstartOk === false) return { ok: false, stdout: "", stderr: "kickstart refused" };
+            pid += 1;
+            return { ok: true, stdout: "", stderr: "" };
           }
           throw new Error(`unexpected launchctl ${args.join(" ")}`);
         },
         cli: async (release, args) => {
           cli.push({ release, args });
-          if (options.platform !== "linux" && args[1] === "install") files.set(plistPath, plistFor(release));
+          if (platform !== "darwin") { effects.push("systemctl restart"); return; }
+          if (args.length === 1 && args[0] === "service" && files.has(plistPath)) {
+            effects.push("bootout", "bootstrap");
+            files.set(plistPath, plistFor(release));
+          } else if (args[0] === "service") {
+            effects.push("stop standalone proxy", "bootout", "bootstrap");
+            files.set(plistPath, plistFor(release));
+          }
         },
+        fetchHealth: async port => {
+          if (options.healthy === false) throw new Error("connection refused");
+          return { status: "ok", service: "opencodex", pid, port };
+        },
+        sleep: async ms => { clock += ms; },
+        now: () => clock,
+        healthTimeoutMs: 5000,
         log: message => { logs.push(message); },
       };
-      return { deps, files, launchctl, cli, logs };
+      return { deps, files, launchctl, cli, effects, logs };
     }
-
-    const forbidden = (args: string[]) => ["stop", "restore", "disconnect", "sync", "uninstall", "remove"]
-      .some(verb => args.includes(verb));
 
     test("only release-pinned paths move onto the current pointer", () => {
       const stable = stablePersonalServiceDefinition(plistFor(oldRelease), [root]);
@@ -153,19 +181,48 @@ describe("install scripts", () => {
       expect(stablePersonalServiceDefinition(stable, [root])).toBe(stable);
     });
 
-    test("an installed macOS service is restarted only by launchctl kickstart -k", async () => {
+    test("the rewrite is literal, bounded, and covers a bare release path", () => {
+      const dollarRoot = "/Users/example/$&-$1 root";
+      // `$&` and `$1` must stay literal; `&` reaches the plist XML-escaped.
+      const dollar = `<string>${xml(dollarRoot)}/releases/${"d".repeat(40)}/src</string>`;
+      expect(stablePersonalServiceDefinition(dollar, [dollarRoot])).toBe(`<string>${xml(dollarRoot)}/current/src</string>`);
+      const bare = `<string>${root}/releases/${"e".repeat(40)}</string>`;
+      expect(stablePersonalServiceDefinition(bare, [root])).toBe(`<string>${root}/current</string>`);
+      const shapes = [
+        `<string>/mnt${root}/releases/${"e".repeat(40)}/src</string>`,
+        `<string>${root}/releases/${"e".repeat(40)}0/src</string>`,
+        `<string>${root}/releases/${"e".repeat(40)}.bak</string>`,
+      ];
+      for (const shape of shapes) expect(stablePersonalServiceDefinition(shape, [root])).toBe(shape);
+    });
+
+    test("an installed macOS service is restarted only by kickstart and must serve again", async () => {
       const host = fakeHost({ plist: plistFor(oldRelease) });
       const progress: PersonalServiceProgress = {};
       await refreshPersonalService(newRelease, host.deps, progress);
       expect(host.cli).toEqual([]);
-      expect(host.launchctl).toEqual([["print", target], ["kickstart", "-k", target]]);
+      expect(host.effects).toEqual([]);
+      expect(host.launchctl).toEqual([["print", target], ["kickstart", "-k", target], ["print", target]]);
       expect(host.files.get(plistPath)).toBe(plistFor(`${root}/current`));
-      expect(progress.action).toBe("kickstart");
+      expect(progress).toEqual({ action: "kickstart", replacedPid: 100, port: 10100 });
 
       // Rollback after the pointer is restored: the same kickstart, never a stop or reload.
       await restorePersonalService(oldRelease, host.deps, progress);
-      expect(host.launchctl).toEqual([["print", target], ["kickstart", "-k", target], ["kickstart", "-k", target]]);
+      expect(host.launchctl.slice(3)).toEqual([["print", target], ["kickstart", "-k", target], ["print", target]]);
       expect(host.cli).toEqual([]);
+      expect(host.effects).toEqual([]);
+    });
+
+    test("a kickstarted job that never answers /healthz fails the refresh", async () => {
+      const host = fakeHost({ plist: plistFor(oldRelease), healthy: false });
+      const progress: PersonalServiceProgress = {};
+      await expect(refreshPersonalService(newRelease, host.deps, progress)).rejects.toThrow("did not answer /healthz on port 10100");
+      // Rollback then kickstarts the previous release; nothing else.
+      expect(progress.action).toBe("kickstart");
+      await expect(restorePersonalService(oldRelease, host.deps, progress)).rejects.toThrow("did not serve");
+      expect(host.launchctl.filter(args => args[0] !== "print")).toEqual([["kickstart", "-k", target], ["kickstart", "-k", target]]);
+      expect(host.cli).toEqual([]);
+      expect(host.effects).toEqual([]);
     });
 
     test("a release-pinned launchd job is left running instead of evicted", async () => {
@@ -173,29 +230,39 @@ describe("install scripts", () => {
       const progress: PersonalServiceProgress = {};
       await expect(refreshPersonalService(newRelease, host.deps, progress)).rejects.toThrow("release-pinned");
       expect(host.launchctl).toEqual([["print", target]]);
-      expect(host.cli).toEqual([]);
       // The stable definition waits on disk for the operator's one-time reload.
       expect(host.files.get(plistPath)).toBe(plistFor(`${root}/current`));
       expect(progress.action).toBeUndefined();
       await restorePersonalService(oldRelease, host.deps, progress);
       expect(host.launchctl).toEqual([["print", target]]);
       expect(host.cli).toEqual([]);
+      expect(host.effects).toEqual([]);
     });
 
-    test("an unverifiable launchd job is not restarted", async () => {
+    test("a job launchd does not hold is not restarted and gets reload steps", async () => {
       const host = fakeHost({ plist: plistFor(oldRelease), live: null });
-      await expect(refreshPersonalService(newRelease, host.deps)).rejects.toThrow("could not be verified");
+      const failure = refreshPersonalService(newRelease, host.deps);
+      await expect(failure).rejects.toThrow("is not loaded in gui/501");
+      await expect(failure).rejects.toThrow("launchctl bootstrap gui/501");
       expect(host.launchctl).toEqual([["print", target]]);
       expect(host.cli).toEqual([]);
     });
 
-    test("a plist that does not run this installation is left alone", async () => {
-      const foreign = plistFor("/opt/homebrew/lib/node_modules/@bitkyc08/opencodex");
-      const host = fakeHost({ plist: foreign });
-      await expect(refreshPersonalService(newRelease, host.deps)).rejects.toThrow("does not run this personal installation");
-      expect(host.files.get(plistPath)).toBe(foreign);
-      expect(host.launchctl).toEqual([]);
-      expect(host.cli).toEqual([]);
+    test("foreign, launcher-form or half-pinned plists are left alone", async () => {
+      const definitions = [
+        plistFor("/opt/homebrew/lib/node_modules/@bitkyc08/opencodex"),
+        plistFor(oldRelease, `${preamble}exec '${root}/bin/ocx' start --port 10100`),
+        plistFor(oldRelease, `${preamble}exec '${oldRelease}/node_modules/bun/bin/bun.exe' '${root}/releases/x/src/cli/index.ts' start --port 10100`),
+      ];
+      for (const definition of definitions) {
+        const host = fakeHost({ plist: definition });
+        await expect(refreshPersonalService(newRelease, host.deps)).rejects.toThrow("the service was not restarted");
+        expect(host.files.get(plistPath)).toBe(definition);
+        expect(host.launchctl).toEqual([]);
+        expect(host.cli).toEqual([]);
+      }
+      const launcher = fakeHost({ plist: plistFor(oldRelease, `${preamble}exec '${root}/bin/ocx' start --port 10100`) });
+      await expect(refreshPersonalService(newRelease, launcher.deps)).rejects.toThrow(`runs '${root}/bin/ocx'`);
     });
 
     test("a failed kickstart is recovered with another kickstart", async () => {
@@ -217,28 +284,63 @@ describe("install scripts", () => {
       expect(host.launchctl).toEqual([]);
     });
 
-    test("a first macOS service install leaves a stable definition for later kickstarts", async () => {
-      const host = fakeHost();
-      await refreshPersonalService(newRelease, host.deps);
+    test("a first macOS service install needs --service and is never rolled back by repair", async () => {
+      const refused = fakeHost();
+      await expect(refreshPersonalService(newRelease, refused.deps)).rejects.toThrow("--service");
+      expect(refused.cli).toEqual([]);
+      expect(refused.effects).toEqual([]);
+
+      const host = fakeHost({ installRequested: true });
+      const progress: PersonalServiceProgress = {};
+      await refreshPersonalService(newRelease, host.deps, progress);
       expect(host.cli).toEqual([{ release: newRelease, args: ["service", "install"] }]);
-      expect(host.launchctl).toEqual([]);
       expect(host.files.get(plistPath)).toBe(plistFor(`${root}/current`));
       expect(host.logs.join("\n")).toContain("one-time reload");
+      // Bare `service` from the previous release would now be repair -> bootout + bootstrap.
+      const before = host.effects.length;
+      await restorePersonalService(oldRelease, host.deps, progress);
+      expect(host.cli).toHaveLength(1);
+      expect(host.effects).toHaveLength(before);
+      expect(host.logs.join("\n")).toContain("launchctl bootout");
     });
 
-    test("no installer path runs a Codex-restoring CLI verb", async () => {
-      const calls: string[][] = [];
-      for (const options of [{ plist: plistFor(oldRelease) }, { platform: "linux" as const }, {}]) {
+    test("no update or rollback path stops, reloads, or runs a Codex-restoring verb", async () => {
+      const forbidden = ["stop", "restore", "disconnect", "sync", "uninstall", "remove", "bootout", "bootstrap", "unload"];
+      const seen: string[][] = [];
+      for (const options of [{ plist: plistFor(oldRelease) }, { plist: plistFor(oldRelease), healthy: false }, { platform: "linux" as const }]) {
         const host = fakeHost(options);
         const progress: PersonalServiceProgress = {};
-        await refreshPersonalService(newRelease, host.deps, progress);
-        await restorePersonalService(oldRelease, host.deps, progress);
-        calls.push(...host.cli.map(call => call.args), ...host.launchctl);
+        await refreshPersonalService(newRelease, host.deps, progress).catch(() => undefined);
+        await restorePersonalService(oldRelease, host.deps, progress).catch(() => undefined);
+        seen.push(...host.cli.map(call => call.args), ...host.launchctl);
+        expect(host.effects.filter(effect => effect !== "systemctl restart")).toEqual([]);
       }
-      expect(calls.filter(forbidden)).toEqual([]);
-      expect(calls.flat()).not.toContain("bootout");
-      const source = await readText("scripts/personal-install.ts");
-      expect(source).not.toMatch(/\[\s*["'](stop|restore|disconnect|sync)["']/);
+      expect(seen.filter(args => args.some(arg => forbidden.includes(arg)))).toEqual([]);
+
+      const source = (await readText("scripts/personal-install.ts"))
+        .replace(/\/\*[\s\S]*?\*\//g, "")
+        .replace(/^\s*\/\/.*$/gm, "");
+      // Catches `run(["stop"])`, `cli(release, "stop")`, `["service", "stop"]` and template forms.
+      expect(source).not.toMatch(/["'`](?:stop|restore|disconnect|sync|uninstall|remove|unload)["'`]/);
+    });
+
+    test("the plist writer replaces a wider .next, keeps 0600, and refuses symlinks", () => {
+      const fixture = mkdtempSync(join(tmpdir(), "ocx-personal-plist-"));
+      try {
+        const path = join(fixture, "com.opencodex.proxy.plist");
+        writeFileSync(`${path}.next`, "stale", { mode: 0o644 });
+        chmodSync(`${path}.next`, 0o644);
+        writePrivateFileAtomic(path, "first");
+        expect(readFileSync(path, "utf8")).toBe("first");
+        expect(mode(path)).toBe(0o600);
+        writePrivateFileAtomic(path, "second");
+        expect(readFileSync(path, "utf8")).toBe("second");
+        expect(mode(path)).toBe(0o600);
+        const link = join(fixture, "linked.plist");
+        symlinkSync(path, link);
+        expect(() => writePrivateFileAtomic(link, "third")).toThrow("symlink");
+        expect(readFileSync(path, "utf8")).toBe("second");
+      } finally { removeModeFixture(fixture); }
     });
   });
 
