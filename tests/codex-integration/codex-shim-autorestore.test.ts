@@ -55,6 +55,8 @@ describe("Codex shim CLI auto-restore policy", () => {
     // consent surface must not trigger a shim repair side effect first.
     expect(skipsCodexShimAutoRestore("resolve", ["resolve"])).toBe(true);
     expect(skipsCodexShimAutoRestore("resolve", ["resolve", "--json"])).toBe(true);
+    // The server's time-boxed health probe must not start a publication it cannot finish.
+    expect(skipsCodexShimAutoRestore("__startup-health", ["__startup-health"])).toBe(true);
     for (const command of ["status", "doctor"]) {
       expect(skipsCodexShimAutoRestore(command, [command])).toBe(true);
       const { deps, warnings, readConfigCalls } = cliDeps({ status: "healthy" }, {
