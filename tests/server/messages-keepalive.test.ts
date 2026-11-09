@@ -160,6 +160,41 @@ describe("messages keep-alive", () => {
     assert.equal(cancelled, true);
   });
 
+  test("the committed stream reads the upstream body only as the client reads", async () => {
+    const req = request();
+    noteMessagesStreamIntent(req, { stream: true });
+    const work = deferred<Response>();
+    const out = await withMessagesKeepalive(req, work.promise, { commitAfterMs: 0, intervalMs: 60_000 });
+    let pulls = 0;
+    const upstream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        pulls++;
+        controller.enqueue(new TextEncoder().encode(`event: content_block_delta\ndata: {"n":${pulls}}\n\n`));
+        if (pulls >= 50) controller.close();
+      },
+    }, { highWaterMark: 0 });
+    work.resolve(new Response(upstream, { status: 200, headers: { "content-type": "text/event-stream" } }));
+    const reader = out.body!.getReader();
+    await reader.read(); // the first ping
+    await reader.read(); // first upstream frame
+    await sleep(20);
+    assert.ok(pulls <= 3, `upstream pulled ${pulls} times for 1 client read`);
+    await reader.cancel();
+  });
+
+  test("a throwing finish callback rejects instead of hanging", async () => {
+    const req = request();
+    noteMessagesStreamIntent(req, { stream: true });
+    await assert.rejects(withMessagesKeepalive(req, Promise.resolve(new Response("x")), fast, {
+      finish: () => { throw new Error("finish failed"); },
+    }), /finish failed/);
+    const work = deferred<Response>();
+    await assert.rejects(withMessagesKeepalive(req, work.promise, fast, {
+      finishCommitted: () => { throw new Error("commit failed"); },
+    }), /commit failed/);
+    work.resolve(new Response("late"));
+  });
+
   test("disabled settings return the work's response unchanged", async () => {
     const req = request();
     noteMessagesStreamIntent(req, { stream: true });
