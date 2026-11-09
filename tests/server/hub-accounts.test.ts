@@ -25,7 +25,7 @@ describe("GET /v1/hub-accounts", () => {
 
   test("returns only masked identity and allow-listed quota fields", async () => {
     const { status, body } = await answerHubAccounts(KEY, KEY, async provider => provider === "anthropic" ? [row(provider, {
-      label: "owner@example.org", upstreamAccountKey: "secret-upstream", masked: "sk-xx",
+      label: "owner@example.com", upstreamAccountKey: "secret-upstream", masked: "sk-xx",
       quota: { weeklyPercent: 40, weeklyResetAt: 5, extra: "nope" } as unknown as AccountRow["quota"],
     })] : []);
     expect(status).toBe(200);
