@@ -1,7 +1,8 @@
 import { approvedCodexProviders } from "./provider-routing";
 import { currentExternalCodexModelProvider, injectCodexConfig } from "./inject";
 import { FOREIGN_CODEX_HOME_OWNER_MESSAGE, UNKNOWN_CODEX_HOME_OWNER_MESSAGE, unbackedRoutedRemovalMessage } from "./catalog/routed-removal";
-import { printProjectCodexConfigWarnings, groupProjectCodexConfigWarningsByPath, type ProjectCodexConfigWarning } from "./project-config-warnings";
+import { formatProjectCodexConfigWarningsForConsole, groupProjectCodexConfigWarningsByPath, resolveCodexConfigPath, type ProjectCodexConfigWarning } from "./project-config-warnings";
+import { PROJECT_CONFIG_SCAN_DEADLINE_MS, scanProjectCodexConfigOffThread } from "./project-config-scan";
 import { refreshCodexModelCatalog } from "./refresh";
 import { applyProxyEnv, loadConfig } from "../config";
 import type { OcxConfig } from "../types";
@@ -332,7 +333,12 @@ export async function syncModelsToCodex(
     warning = warning ? `${warning} ${historyWarning}` : historyWarning;
   }
   reportCodexHomeTarget(log, deps.collectCodexHomeDiagnostic ?? collectOrcaCodexHomeDiagnostic);
-  const projectConfigWarnings = printProjectCodexConfigWarnings(log, { cwd: process.cwd() });
+  const projectConfigScan = await scanProjectCodexConfigOffThread({ cwd: process.cwd(), codexConfigPath: resolveCodexConfigPath() });
+  const projectConfigWarnings = projectConfigScan.warnings;
+  for (const line of formatProjectCodexConfigWarningsForConsole(projectConfigWarnings)) log?.log(line);
+  if (projectConfigScan.status === "timed_out") {
+    log?.log(`Project Codex config check skipped: it did not finish within ${PROJECT_CONFIG_SCAN_DEADLINE_MS / 1000}s. A trusted project may be on a slow or unapproved volume; run 'ocx doctor' to check it.`);
+  }
   return {
     status: "applied",
     ok: result.success,

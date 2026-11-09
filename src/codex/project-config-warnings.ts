@@ -14,6 +14,7 @@ import { defaultCodexHome } from "./home";
 import { readBoundedCodexConfig } from "./inject/bounded-config-reader";
 import { readRootTomlString } from "./paths";
 import { truncateRetainedUtf8 } from "../lib/admission";
+import { scanProjectCodexConfigOffThread, type ProjectConfigScanStatus } from "./project-config-scan";
 
 const OCX_SECTION_MARKER = "# Auto-injected by opencodex";
 const DIAGNOSTICS_CACHE_TTL_MS = 30_000;
@@ -47,7 +48,7 @@ export function readBoundedProjectConfig(filePath: string): string | null {
   }
 }
 
-function resolveCodexConfigPath(): string {
+export function resolveCodexConfigPath(): string {
   const raw = process.env.CODEX_HOME?.trim();
   const home = raw ? resolve(expandUserPath(raw)) : defaultCodexHome();
   return join(home, "config.toml");
@@ -73,7 +74,8 @@ interface TomlDocument {
 
 type TomlMultilineDelimiter = '"""' | "'''";
 
-let diagnosticsCache: { at: number; warnings: ProjectCodexConfigWarning[] } | null = null;
+let diagnosticsCache: { at: number; status: ProjectConfigScanStatus; warnings: ProjectCodexConfigWarning[] } | null = null;
+let diagnosticsScan: Promise<void> | null = null;
 
 function hasInjectedOpenaiBaseUrl(content: string): boolean {
   const lines = content.split("\n");
@@ -478,25 +480,29 @@ export function invalidateProjectConfigDiagnosticsCache(): void {
   diagnosticsCache = null;
 }
 
-export function getCachedProjectConfigDiagnostics(): {
+export async function getCachedProjectConfigDiagnostics(): Promise<{
   warnings: ProjectCodexConfigWarning[];
   grouped: ProjectCodexConfigWarningGroup[];
-} {
-  const now = Date.now();
-  if (!diagnosticsCache || now - diagnosticsCache.at > DIAGNOSTICS_CACHE_TTL_MS) {
-    diagnosticsCache = {
-      at: now,
-      warnings: collectProjectCodexConfigWarnings().map(warning => ({
-        ...warning,
-        path: truncateRetainedUtf8(warning.path, MAX_DIAGNOSTIC_VALUE_BYTES),
-        detail: truncateRetainedUtf8(warning.detail, MAX_DIAGNOSTIC_VALUE_BYTES),
-        ...(warning.profileName === undefined ? {} : { profileName: truncateRetainedUtf8(warning.profileName, MAX_DIAGNOSTIC_VALUE_BYTES) }),
-        message: truncateRetainedUtf8(warning.message, MAX_DIAGNOSTIC_VALUE_BYTES),
-      })),
-    };
+  status: ProjectConfigScanStatus;
+}> {
+  if (!diagnosticsCache || Date.now() - diagnosticsCache.at > DIAGNOSTICS_CACHE_TTL_MS) {
+    diagnosticsScan ??= scanProjectCodexConfigOffThread({ codexConfigPath: resolveCodexConfigPath() }).then(scan => {
+      diagnosticsCache = {
+        at: Date.now(),
+        status: scan.status,
+        warnings: scan.warnings.map(warning => ({
+          ...warning,
+          path: truncateRetainedUtf8(warning.path, MAX_DIAGNOSTIC_VALUE_BYTES),
+          detail: truncateRetainedUtf8(warning.detail, MAX_DIAGNOSTIC_VALUE_BYTES),
+          ...(warning.profileName === undefined ? {} : { profileName: truncateRetainedUtf8(warning.profileName, MAX_DIAGNOSTIC_VALUE_BYTES) }),
+          message: truncateRetainedUtf8(warning.message, MAX_DIAGNOSTIC_VALUE_BYTES),
+        })),
+      };
+    }).finally(() => { diagnosticsScan = null; });
+    await diagnosticsScan;
   }
-  const warnings = diagnosticsCache.warnings;
-  return { warnings, grouped: groupProjectCodexConfigWarningsByPath(warnings) };
+  const { warnings, status } = diagnosticsCache ?? { warnings: [], status: "failed" as const };
+  return { warnings, grouped: groupProjectCodexConfigWarningsByPath(warnings), status };
 }
 
 export function summarizeProjectCodexIssue(warning: ProjectCodexConfigWarning): string {
@@ -592,17 +598,4 @@ export function formatProjectCodexConfigWarningsForConsole(warnings: ProjectCode
     lines.push("    fix: remove those entries so OpenCodex proxy routing applies in this project");
   }
   return lines;
-}
-
-export function printProjectCodexConfigWarnings(
-  log?: Pick<Console, "log"> | null,
-  options?: Parameters<typeof collectProjectCodexConfigWarnings>[0],
-): ProjectCodexConfigWarning[] {
-  const warnings = collectProjectCodexConfigWarnings(options);
-  if (log) {
-    for (const line of formatProjectCodexConfigWarningsForConsole(warnings)) {
-      log.log(line);
-    }
-  }
-  return warnings;
 }
