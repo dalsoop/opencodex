@@ -1,0 +1,58 @@
+name: k3s hub image
+
+# Builds the hub image that gujoai k3s-infra runs (live/pve-k3s-svc/opencodex) from the
+# k3s/* deployment branches of dalsoop/opencodex, and pushes it to GHCR. k3s-infra pins the
+# image by the digest printed in the job summary.
+
+on:
+  push:
+    branches: ["k3s/**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: k3s-image-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  image:
+    if: github.repository == 'dalsoop/opencodex'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
+      - uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Tags
+        id: tags
+        run: |
+          version=$(jq -r .version package.json)
+          short=${GITHUB_SHA::12}
+          echo "tags=ghcr.io/dalsoop/opencodex:${version}-k3s-${short}" >> "$GITHUB_OUTPUT"
+      - id: build
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          provenance: false
+          tags: ${{ steps.tags.outputs.tags }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/dalsoop/opencodex
+            org.opencontainers.image.revision=${{ github.sha }}
+      - name: Summary
+        run: |
+          {
+            echo "image: ${{ steps.tags.outputs.tags }}"
+            echo "digest: ${{ steps.build.outputs.digest }}"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "image ${{ steps.tags.outputs.tags }}@${{ steps.build.outputs.digest }}"
