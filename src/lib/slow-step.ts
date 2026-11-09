@@ -12,7 +12,8 @@ export const SLOW_STEP_LOG_MS = 1_000;
 export async function logIfSlow<T>(
   label: string,
   run: () => Promise<T>,
-  log: (message: string) => void = message => console.log(message),
+  // stderr: CLI commands that print JSON on stdout also run catalog discovery.
+  log: (message: string) => void = message => console.warn(message),
   now: () => number = Date.now,
 ): Promise<T> {
   const started = now();
