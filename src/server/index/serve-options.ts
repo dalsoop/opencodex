@@ -848,11 +848,7 @@ export function createServeOptions(ctx: ServeOptionsContext) {
         );
       }
 
-      if (url.pathname === "/v1/hub-accounts" && req.method === "GET") {
-        const { handleHubAccounts } = await import("../hub-accounts");
-        return handleHubAccounts(req, config, policy);
-      }
-
+      if (url.pathname === "/v1/hub-accounts" && req.method === "GET") return (await import("../hub-accounts")).handleHubAccounts(req, config, policy);
       if (url.pathname === "/v1/usage" && req.method === "GET") {
         const { handleHubUsage } = await import("../hub-usage");
         return handleHubUsage(req, config, policy);
