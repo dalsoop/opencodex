@@ -7,6 +7,7 @@ import { clientFacingModelLabel, clientFacingModelText } from "../lib/error-dest
 import { classifyUpstreamCondition } from "../lib/upstream-condition";
 import { CodexInstallationIdUnavailableError } from "../codex/installation-id";
 import { recordLocalFailureDetail, type FailureDetail } from "./request-log-failure-detail";
+import { noteMessagesStreamIntent } from "./messages-keepalive";
 /**
  * Anthropic Messages inbound (/v1/messages + /v1/messages/count_tokens) for Claude Code.
  *
@@ -674,6 +675,8 @@ async function handleClaudeMessagesWithBudget(
   const advisorAdmissionPolicy = logIds?.advisorAdmissionPolicy ?? captureAdmissionPolicy(config, logIds?.admission);
   try {
     anthropicBody = await readAnthropicBody(req, translatorBudget, resolveInboundBodyLimitBytes(config.maxInboundBodyBytes));
+    // The HTTP boundary keeps a streamed turn alive while it waits (messages-keepalive.ts).
+    noteMessagesStreamIntent(req, anthropicBody);
     clientModelLabel = clientFacingModelLabel(isRec(anthropicBody) ? anthropicBody.model : undefined);
     // Defensive [1m] strip (devlog 138): clients normally remove the context-variant
     // marker themselves; the 1M signal we act on is the anthropic-beta header.
