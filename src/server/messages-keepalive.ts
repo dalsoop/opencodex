@@ -138,6 +138,8 @@ function isStreamedSuccess(response: Response): boolean {
     && (response.headers.get("content-type") ?? "").toLowerCase().includes("text/event-stream");
 }
 
+type WorkOutcome = { response: Response } | { error: unknown };
+
 export interface MessagesKeepaliveOptions {
   /** Applied to the proxy's own response when it is returned before any commit. */
   finish?: (response: Response) => Response;
@@ -171,78 +173,83 @@ export function withMessagesKeepalive(
       pollTimer = undefined;
     };
 
-    // Filled in only after a commit: the committed stream's handlers for work's outcome.
-    let onWorkResponse: ((response: Response) => void) | undefined;
-    let onWorkError: ((error: unknown) => void) | undefined;
+    // Filled in only after a commit: hands work's outcome to the committed stream.
+    let deliver: ((outcome: WorkOutcome) => void) | undefined;
+    const settle = (make: () => Response) => {
+      try { resolve(make()); } catch (error) { reject(error); }
+    };
 
     const commit = () => {
       committed = true;
       stopWaiting();
       let pingTimer: ReturnType<typeof setInterval> | undefined;
       let closed = false;
-      let cancelled = false;
       let innerReader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+      let outcome: Promise<WorkOutcome> | undefined;
       const stopPings = () => {
         if (pingTimer) clearInterval(pingTimer);
         pingTimer = undefined;
       };
       const body = new ReadableStream<Uint8Array>({
         start(controller) {
-          const close = () => {
+          controller.enqueue(PING_FRAME);
+          pingTimer = setInterval(() => {
+            if (closed) return;
+            try { controller.enqueue(PING_FRAME); } catch { stopPings(); }
+          }, settings.intervalMs);
+          outcome = new Promise<WorkOutcome>(resolveOutcome => {
+            deliver = result => {
+              // Stop pings before any upstream byte, so no ping lands inside a split frame.
+              stopPings();
+              if (closed) {
+                if ("response" in result) result.response.body?.cancel().catch(() => undefined);
+                return;
+              }
+              resolveOutcome(result);
+            };
+          });
+        },
+        // Pull-driven, so a slow client back-pressures the upstream body exactly as before the commit.
+        async pull(controller) {
+          if (closed) return;
+          if (!innerReader) {
+            const result = await outcome!;
+            if (closed) return;
+            if ("error" in result) {
+              const message = result.error instanceof Error && result.error.message ? result.error.message : "request failed";
+              controller.enqueue(errorFrame("api_error", `opencodex: ${message}`));
+              closed = true;
+              controller.close();
+              return;
+            }
+            if (!isStreamedSuccess(result.response)) {
+              const frame = await errorFrameForResponse(result.response);
+              if (closed) return;
+              controller.enqueue(frame);
+              closed = true;
+              controller.close();
+              return;
+            }
+            innerReader = result.response.body!.getReader();
+          }
+          try {
+            const { done: eof, value } = await innerReader.read();
+            if (closed) return;
+            if (eof) { closed = true; controller.close(); return; }
+            controller.enqueue(value);
+          } catch (error) {
             if (closed) return;
             closed = true;
-            stopPings();
-            try { controller.close(); } catch { /* already closed */ }
-          };
-          const enqueue = (chunk: Uint8Array): boolean => {
-            if (closed) return false;
-            try { controller.enqueue(chunk); return true; } catch { closed = true; stopPings(); return false; }
-          };
-          enqueue(PING_FRAME);
-          pingTimer = setInterval(() => { enqueue(PING_FRAME); }, settings.intervalMs);
-          onWorkResponse = response => {
-            stopPings();
-            if (cancelled || closed) {
-              response.body?.cancel().catch(() => undefined);
-              return;
-            }
-            if (!isStreamedSuccess(response)) {
-              void errorFrameForResponse(response).then(frame => { enqueue(frame); close(); });
-              return;
-            }
-            innerReader = response.body!.getReader();
-            const reader = innerReader;
-            const pump = async (): Promise<void> => {
-              try {
-                for (;;) {
-                  const { done: eof, value } = await reader.read();
-                  if (eof) { close(); return; }
-                  if (!enqueue(value)) { reader.cancel().catch(() => undefined); return; }
-                }
-              } catch (error) {
-                if (closed) return;
-                closed = true;
-                try { controller.error(error); } catch { /* torn down */ }
-              }
-            };
-            void pump();
-          };
-          onWorkError = error => {
-            stopPings();
-            if (cancelled || closed) return;
-            const message = error instanceof Error && error.message ? error.message : "request failed";
-            enqueue(errorFrame("api_error", `opencodex: ${message}`));
-            close();
-          };
+            controller.error(error);
+          }
         },
         cancel(reason) {
-          cancelled = true;
           closed = true;
           stopPings();
           innerReader?.cancel(reason).catch(() => undefined);
         },
       }, { highWaterMark: 0 });
-      resolve(finishCommitted(new Response(body, {
+      settle(() => finishCommitted(new Response(body, {
         status: 200,
         headers: {
           "content-type": "text/event-stream; charset=utf-8",
@@ -270,14 +277,14 @@ export function withMessagesKeepalive(
       response => {
         done = true;
         stopWaiting();
-        if (!committed) { resolve(finish(response)); return; }
-        onWorkResponse?.(response);
+        if (!committed) { settle(() => finish(response)); return; }
+        deliver?.({ response });
       },
       error => {
         done = true;
         stopWaiting();
         if (!committed) { reject(error); return; }
-        onWorkError?.(error);
+        deliver?.({ error });
       },
     );
   });
