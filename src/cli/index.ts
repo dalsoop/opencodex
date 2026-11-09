@@ -751,7 +751,8 @@ async function handleStart(options: { block?: boolean } = {}) {
     },
   );
   if (!startupSync.ran) console.log(startupLeftCodexNativeLine(localClientSkipReason(config), server.port ?? port));
-  await refreshOwnedRaycastCatalog(config, port);
+  const { logIfSlow } = await import("../lib/slow-step");
+  await logIfSlow("startup: raycast catalog", () => refreshOwnedRaycastCatalog(config, port));
   if (!cleaned && !shuttingDown) healthSentinel = startServiceHealthSentinel(config); // after startup reconciliation; never mid-boot or mid-drain
   // #1046: one warning per startup, after BOTH writes. The server's cache
   // invalidation happens first and the catalog sync second, so the mtime is only
@@ -777,7 +778,8 @@ async function handleStart(options: { block?: boolean } = {}) {
   // one restart, because the toggle removed the fence and start wrote it back.
   if (shouldSyncGrokOnStart(config)) try {
     const { syncGrokConfig } = await import("../grok/sync");
-    const r = await syncGrokConfig(port, config, config.hostname ? { hostname: config.hostname } : {});
+    const r = await logIfSlow("startup: grok config",
+      () => syncGrokConfig(port, config, config.hostname ? { hostname: config.hostname } : {}));
     if (r.changed) console.log("   + Grok Build config updated (~/.grok/config.toml)");
     else if (!r.ok) console.error(`⚠️  ${r.message}`);
   } catch (err) {

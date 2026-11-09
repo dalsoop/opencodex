@@ -4,6 +4,7 @@ import { injectClaudeAgentDefs } from "../claude/agents-inject";
 import { readCachedHubState } from "../client/hub-state";
 import { fetchClaudeContextWindows } from "./claude";
 import type { ReadinessGate } from "../server/readiness";
+import { logIfSlow } from "../lib/slow-step";
 
 export interface ClaudeAgentStartupSyncDeps {
   fetchContextWindows?: typeof fetchClaudeContextWindows;
@@ -57,9 +58,9 @@ export async function reconcileClientStartupBeforeReady<T>(
     markFailed: () => readinessGate.markFailed(),
   };
 
-  const result = await syncCodex(deferredGate);
-  await syncClaudeRoster();
-  await syncDesktopRegistry?.();
+  const result = await logIfSlow("startup: codex sync", () => syncCodex(deferredGate));
+  await logIfSlow("startup: claude roster", syncClaudeRoster);
+  if (syncDesktopRegistry) await logIfSlow("startup: desktop registry", syncDesktopRegistry);
   if (codexReady) readinessGate.markReady();
   return result;
 }
