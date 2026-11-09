@@ -23,9 +23,11 @@ export function initDesktop3pRegistry(config: OcxConfig): Promise<boolean> {
       const { desktopVisibleNativeSlugs } = await import("../codex/catalog");
       const { resolveAdmittedCodexModelEntitlements } = await import("../codex/model-entitlement-admission");
       const { buildDesktopDiscoveryInputs } = await import("./desktop-discovery-inputs");
+      const { logIfSlow } = await import("../lib/slow-step");
       const [models, modelEntitlements] = await Promise.all([
-        fetchAllModels(config),
-        resolveAdmittedCodexModelEntitlements(config, { clientVersion: null }),
+        logIfSlow("desktop registry: routed models", () => fetchAllModels(config)),
+        logIfSlow("desktop registry: codex entitlements",
+          () => resolveAdmittedCodexModelEntitlements(config, { clientVersion: null })),
       ]);
       const inputs = buildDesktopDiscoveryInputs({
         config, models, modelEntitlements,

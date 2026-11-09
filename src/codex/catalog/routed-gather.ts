@@ -106,6 +106,7 @@ import { applyProviderConfigHints, configuredAutoCompactTokenLimit, configuredMa
 import { resolveComboCatalogMember } from "./combo-member";
 import { captureGatherFlight, captureTrustedOpenAiApiPolicy, gatherFlightKey, keyedGatherBytesIdentity, withCanonicalOpenAiForwardAuthDefault } from "./gather-capture";
 import { fetchProviderModelsWithAuth, observedModelsAuthResolver, refreshingModelsAuthResolver } from "./provider-models";
+import { logIfSlow } from "../../lib/slow-step";
 
 export interface GatherRoutedModelsOptions {
   comboOmissions?: ComboCatalogOmission[];
@@ -340,12 +341,12 @@ async function gatherRoutedModelsUncached(
   // Use admission-time provider clones for sidecar advertisement, custom rows and combo members.
   const enrichedByName = new Map(activeProviders.map(provider => [provider.name, provider.provider]));
   const providerResults = await Promise.all(
-    activeProviders.map(provider => fetchProviderModelsWithAuth(
+    activeProviders.map(provider => logIfSlow(`model discovery: ${provider.name}`, () => fetchProviderModelsWithAuth(
       provider,
       ttlMs,
       providerContextCap(config, provider.name),
       resolveAuth,
-    )),
+    ))),
   );
   const lists = providerResults.map(result => result.models);
   const apiAugmented = augmentRoutedModelsWithCapturedOpenAiApiRows(

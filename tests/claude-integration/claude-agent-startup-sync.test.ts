@@ -11,6 +11,28 @@ import { injectClaudeAgentDefs } from "../../src/claude/agents-inject";
 import { createReadinessGate } from "../../src/server/readiness";
 import type { OcxConfig } from "../../src/types";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
+import { logIfSlow, SLOW_STEP_LOG_MS } from "../../src/lib/slow-step";
+
+describe("slow startup step lines", () => {
+  test("logs only a step at or over the threshold, with its label, and keeps the result", async () => {
+    const lines: string[] = [];
+    let clock = 0;
+    const now = () => clock;
+    const fast = await logIfSlow("fast step", async () => { clock += SLOW_STEP_LOG_MS - 1; return 1; }, line => lines.push(line), now);
+    const slow = await logIfSlow("slow step", async () => { clock += SLOW_STEP_LOG_MS; return 2; }, line => lines.push(line), now);
+    expect([fast, slow]).toEqual([1, 2]);
+    expect(lines).toEqual([`[slow-step] slow step took ${SLOW_STEP_LOG_MS}ms`]);
+  });
+
+  test("a slow failing step still logs and rethrows the same error", async () => {
+    const lines: string[] = [];
+    let clock = 0;
+    const failure = new Error("step failed");
+    await expect(logIfSlow("failing step", async () => { clock += 5_000; throw failure; },
+      line => lines.push(line), () => clock)).rejects.toBe(failure);
+    expect(lines).toEqual(["[slow-step] failing step took 5000ms"]);
+  });
+});
 
 const config = (claudeCode: OcxConfig["claudeCode"] = {}): OcxConfig => ({
   providers: [],
