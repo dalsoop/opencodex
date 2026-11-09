@@ -390,7 +390,7 @@ export function assertServerAuthConfig(config: OcxConfig): void {
   }
 }
 
-function secretEquals(actual: string, expected: string | undefined): boolean {
+export function secretEquals(actual: string, expected: string | undefined): boolean {
   if (!expected) return false;
   const enc = new TextEncoder();
   const actualBytes = enc.encode(actual);
