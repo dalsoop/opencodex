@@ -26,6 +26,7 @@ import {
   withRequestLogId,
   withMessagesRequestLogId,
 } from "./startup-warnings";
+import { resolveMessagesKeepaliveSettings, withMessagesKeepalive } from "../messages-keepalive";
 
 import { remoteWorkspaceEnabled } from "../../remote-control/workspace-activation";
 import { isClaudeInterceptedPath } from "../../claude/intercept/listener";
@@ -1598,12 +1599,13 @@ export function createServeOptions(ctx: ServeOptionsContext) {
           (lease: ActiveTurnLease) => { ownsRequestLog = true; return work(lease); };
         // Capture at authentication: runAdmittedHttpTurn can wait for body capacity first (#7859).
         const advisorAdmissionPolicy = captureAdmissionPolicy(config, admission);
-        const response = await runAdmittedHttpTurn(sessionReq, policy, claimRequestLog(async turnAdmissionLease => withCors(
+        const turn = runAdmittedHttpTurn(sessionReq, policy, claimRequestLog(async turnAdmissionLease => withCors(
           await handleClaudeMessages(sessionReq, config, logCtx, { requestId, start, turnAdmissionLease, admission, advisorAdmissionPolicy }, policy, { claudeIntercept: ingress === "claude-intercept" }),
           req,
           policy,
         )), { requestId, start, logCtx, onLogged: () => { ownsRequestLog = true; } });
-        return ownsRequestLog ? withMessagesRequestLogId(response, requestId) : response;
+        return await withMessagesKeepalive(sessionReq, turn, resolveMessagesKeepaliveSettings(), { // pings while it waits
+          finish: r => ownsRequestLog ? withMessagesRequestLogId(r, requestId) : r, finishCommitted: r => withMessagesRequestLogId(withCors(r, req, policy), requestId) });
       }
 
       // OpenAI Chat Completions inbound (GitHub Copilot App / OpenAI-compatible clients).
