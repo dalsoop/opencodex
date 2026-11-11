@@ -160,7 +160,6 @@ function normalizeEffortFamilies(config: OcxConfig, provider: string, rows: Anti
   }
   const defaultModel = config.providers[provider]?.defaultModel;
   return { discoveredIds: normalizeIds(rows.map(row => row.id)), baseline, inheritedDisables,
-    switchCandidateIds: [...new Set([...rows.map(row => row.id), ...aliases.keys(), ...(prior?.ids ?? [])])],
     defaultModel: defaultModel ? normalize(defaultModel) : undefined };
 }
 
@@ -183,7 +182,7 @@ export function reconcileSuccessfulModelDiscoveries(options: {
   for (const provider of options.authoritativeProviders) {
     const configured = options.config.providers[provider];
     if (!configured || configured.liveModels === false) continue;
-    const { discoveredIds, baseline, inheritedDisables, defaultModel, switchCandidateIds } = normalizeEffortFamilies(
+    const { discoveredIds, baseline, inheritedDisables, defaultModel } = normalizeEffortFamilies(
       options.config, provider, byProvider.get(provider) ?? [],
     );
     const discovery = options.config.modelDiscovery ??= {};
@@ -197,7 +196,7 @@ export function reconcileSuccessfulModelDiscoveries(options: {
         || (baseline && baseline.ids.length < INITIAL_MODEL_SELECTION_THRESHOLD)
         || (baseline && !defaultModel)
         || (configured.modelPreset?.mode === "all" && !configured.modelPreset.fallback)
-        || options.config.disabledModels?.some(selector => switchCandidateIds.some(id => slugEquals(selector, provider, id)))
+        || options.config.disabledModels?.some(selector => discoveredIds.some(id => slugEquals(selector, provider, id)))
         ? undefined : defaultModel ? [defaultModel] : [],
       now: options.now,
       mode: options.mode,
