@@ -94,7 +94,9 @@ describe("enforce-pr-target workflow", () => {
 
   it("writes exactly one consolidated comment via a single upsert helper", () => {
     assert.match(workflow, /GATE_MARKER,/);
-    assert.match(workflow, /comment\.body\?\.includes\(GATE_MARKER\)/);
+    // The gate comment is the bot comment that starts with GATE_MARKER; a
+    // marker echoed inside another comment does not classify it.
+    assert.match(workflow, /comments\.find\(isGateComment\)/);
     assert.match(workflow, /upsertGateComment/);
     assert.match(workflow, /buildGateCommentBody/);
     // No legacy two-comment write path remains.
@@ -163,24 +165,23 @@ describe("enforce-pr-target workflow", () => {
       .split("- name: Checkout trusted PR-quality scripts")[1]
       .split(/\n {6}- name:/)[0];
     assert.match(checkoutStep, /actions\/checkout@[0-9a-f]{40}/);
-    // The trusted ref comes from a fixed set of integration branches, never
-    // from the PR's own base commit: a stacked child's base is another open
-    // PR's head, and `base.sha` would let that unpromoted commit choose the
-    // code that runs with this job's write-capable token.
+    // The trusted ref is the single integration branch, never the PR's own
+    // base commit: a stacked child's base is another open PR's head, and
+    // `base.sha` would let that unpromoted commit choose the code that runs
+    // with this job's write-capable token.
     //
     // `status` has no pull_request payload and sources from the default branch
-    // that supplied the privileged workflow. A `main`-targeting PR sources
-    // from `main` so the workflow definition and the scripts match. Everything
-    // else resolves to `dev`.
+    // that supplied the privileged workflow. Every pull_request event resolves
+    // to `dev`, the only integration branch.
     //
-    // Exact equality, not fragment matching: separate checks for `status`,
-    // `main`, and `dev` would all pass with the operator grouping wrong or a
-    // surviving `base.sha` fallback.
+    // Exact equality, not fragment matching: separate checks for `status` and
+    // `dev` would both pass with the operator grouping wrong or a surviving
+    // `base.sha` fallback.
     const ref = checkoutStep.match(/^\s*ref:\s*(.+)$/m)?.[1];
     assert.ok(ref, "trusted checkout must declare ref");
     assert.equal(
       ref.replace(/\s+/g, " ").trim(),
-      "${{ github.event_name == 'status' && github.event.repository.default_branch || (github.event.pull_request.base.ref == 'main' && 'main' || 'dev') }}",
+      "${{ github.event_name == 'status' && github.event.repository.default_branch || 'dev' }}",
     );
     assert.doesNotMatch(ref, /base\.sha|head\.(?:sha|ref)/);
     // Pinning the checkout ref only gates one step. A later `run:` or
@@ -213,7 +214,7 @@ describe("enforce-pr-target workflow", () => {
     const checkouts = workflow.match(/uses:\s*actions\/checkout@[\s\S]*?(?=\n {6}- name:|$)/g) ?? [];
     for (const step of checkouts) {
       const stepRef = (step.match(/^\s*ref:\s*(.+)$/m)?.[1] ?? "").replace(/\s+/g, " ").trim();
-      assert.equal(stepRef, "${{ github.event_name == 'status' && github.event.repository.default_branch || (github.event.pull_request.base.ref == 'main' && 'main' || 'dev') }}", "every checkout must use the trusted ref");
+      assert.equal(stepRef, "${{ github.event_name == 'status' && github.event.repository.default_branch || 'dev' }}", "every checkout must use the trusted ref");
       assert.doesNotMatch(step, /repository:/, "a checkout must not retarget its repository");
     }
     // Checkout is not the only way to obtain PR-controlled code. A `run:` step

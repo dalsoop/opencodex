@@ -32,6 +32,12 @@ Dosya ayrıştırılamazsa opencodex dosyayı `config.json.invalid-<zaman-damgas
 olarak yedekler, konsolda uyarır ve varsayılanlarla başlar. Eksik bir dosya da
 yeni yükleme varsayılanını kullanır: bir `openai` iletme sağlayıcısı.
 
+Yerel `ocx config set`, `unset`, `import`, çevrimdışı `ocx effort`, özel modeller için add/remove
+ve sağlayıcılar için add/remove/set-default işlemleri, mevcut `config.json` geçersiz veya okunamaz
+olduğunda dosyanın baytlarını değiştirmeden işlemi reddeder. Yeniden denemeden önce
+`ocx config validate` komutunu çalıştırıp dosyayı onarın. Yapılandırma zaten varsa import işlemi de
+okunabilir ve geçerli bir hedef dosya gerektirir.
+
 ## Öncelik ve varsayılanlar
 
 `config.json` içindeki geçerli değerler yerleşik varsayılanları geçersiz kılar.
@@ -73,6 +79,9 @@ opencodex, yönetilen `config.toml` ve `opencodex-catalog.json` dosyalarını
 geçici bir dosya ve ardından yeniden adlandırma (`atomicWriteFile`) yoluyla
 yazar. Bu, `ocx stop` ve proxy kapatma işleyicisi gibi eşzamanlı yazıcılar
 Codex'i aynı anda geri yüklediğinde kısmi dosyaları önler.
+Windows'ta `opencodex-catalog.json` salt okunur özniteliği taşıdığı için yeniden adlandırma
+reddedilirse opencodex özniteliği kaldırıp bir kez daha dener; yine başarısız olursa ham `EPERM` yerine
+`Codex catalog is read-only: <path>` bildirir.
 :::
 
 

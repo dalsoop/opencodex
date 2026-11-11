@@ -1,3 +1,4 @@
+import { CodexInstallationIdUnavailableError } from "../../codex/installation-id";
 import type { ResponsesRequestContext } from "./core-options";
 import type { PreparedResponsesRequest } from "./request-prepare";
 import type { ResponsesTransport } from "./request-transport";
@@ -52,6 +53,7 @@ export async function prepareResponsesSidecarAuth(
   const visionDescribeTerminal = options.visionDescribeTerminal === true;
   const routedCompaction = parsed._compactionRequest === true
     && (!supportsNativeResponsesCompactionTrigger(route.provider) || parsed._portableCompaction === true);
+  const preserveCompactionPrefix = routedCompaction && transportState.adapter.name === "anthropic";
   if (routedCompaction) parsed.context.messages = omitEarlierCompactionImages(parsed.context.messages);
   const needsOpenAiVision = !visionDescribeTerminal
     && shouldResolveOpenAiVisionSidecar(config, route.provider, route.modelId, parsed, route.providerName);
@@ -110,7 +112,8 @@ export async function prepareResponsesSidecarAuth(
       // An unavailable/cooling/expired Multi credential disables the helper; it
       // must not turn a valid routed-provider request into a Codex-auth failure.
       if (
-        !(err instanceof CodexPoolAuthenticationError)
+        !(err instanceof CodexInstallationIdUnavailableError)
+        && !(err instanceof CodexPoolAuthenticationError)
         && !(err instanceof CodexAuthContextError)
         && !(err instanceof CodexAccountCooldownError)
         && !(err instanceof CodexThreadAffinityExpiredError)
@@ -130,6 +133,7 @@ export async function prepareResponsesSidecarAuth(
     ? undefined
     : planVisionSidecar(config, route.provider, route.modelId, parsed, openAiSidecar, {
       admission: options.admission, codexAuthPolicy: options.codexAuthPolicy, providerName: route.providerName,
+      advisorAdmissionPolicy: options.advisorAdmissionPolicy,
     });
   const recordSidecarOutcome = openAiSidecar?.recordOutcome;
   if (visionPlan) {
@@ -158,6 +162,7 @@ export async function prepareResponsesSidecarAuth(
   return {
     openAiSidecar,
     routedCompaction,
+    preserveCompactionPrefix,
   };
 }
 

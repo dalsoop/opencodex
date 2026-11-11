@@ -1,4 +1,4 @@
-import type { UpstreamHttpVersion, ReasoningSummaryDelivery, CodexAccountMode } from "./wire";
+import type { UpstreamHttpVersion, ReasoningSummaryDelivery, CodexAccountMode, ThinkingDisplayPolicy } from "./wire";
 import type { AccountAutoPausePolicy, AccountPauseDetails } from "./account-auto-pause";
 import type { AnthropicAccountPoolConfig } from "./anthropic-account-pool";
 
@@ -278,18 +278,30 @@ export type TierDecision =
   | { readonly kind: "drop" }
   | { readonly kind: "set"; readonly value: string };
 
-/**
- * One configured provider entry. `authMode` (default `"key"`) decides whether same-target 429
- * retries are allowed; OAuth/forward credentials and local runtimes are never replayed.
- */
+/** Independent reasoning axes. Absence means unknown, not an explicit denial. */
+export interface ReasoningCapabilities {
+  supportsReasoning?: boolean;
+  supportsThinkingToggle?: boolean;
+  supportsReasoningEffort?: boolean;
+  defaultThinkingEnabled?: boolean;
+}
+
 /** Explicit per-model operator declarations; absent axes keep legacy behavior. */
-export interface ModelCapabilities {
+export interface ModelCapabilities extends ReasoningCapabilities {
   inputModalities?: Array<"text" | "image" | "audio" | "video">;
   /** Requested tier only; does not imply an upstream window or activate an unverified wire. */
   contextTier?: "default" | "long_context";
   video?: { processing?: "static" | "agentic" };
+  /** Opt in exact first-party DeepSeek models to one-hour image file persistence. */
+  deepseekImageFiles?: boolean;
+  /** Images a first-party Mistral Chat request may carry for this model; older ones are pruned. */
+  mistralMaxImages?: number;
 }
 
+/**
+ * One configured provider entry. `authMode` (default `"key"`) decides whether same-target 429
+ * retries are allowed; OAuth/forward credentials and local runtimes are never replayed.
+ */
 export interface OcxProviderConfig {
   /** Explicit builtin Pool 2 provenance; endpoints never imply ownership. */
   anthropicOAuthInstance?: "anthropic2";
@@ -425,6 +437,14 @@ export interface OcxProviderConfig {
   /** Exact upstream model ids that override the provider-level service-tier capability. */
   modelSupportsServiceTier?: Record<string, boolean>;
   /**
+   * Whether to promote Codex Desktop's `additional_tools` input items into top-level `tools`
+   * and strip the wrapper from `input`. Enabled automatically for OpenCode Go and xAI
+   * (`api.x.ai` and `cli-chat-proxy.grok.com`) except on forward-auth routes, which need an
+   * explicit `true`; other strict gateways that return HTTP 422 for unknown item types in
+   * `input` can opt in here.
+   */
+  promoteAdditionalTools?: boolean;
+  /**
    * Responses upstream whose native contract accepts plaintext reasoning replay
    * (DeepSeek documents reasoning items with plaintext content). When set, the
    * passthrough serializer keeps `reasoning_text` content on replayed reasoning
@@ -470,6 +490,8 @@ export interface OcxProviderConfig {
    * reasoning output items when they are sent back on a continuation.
    */
   dropResponsesReasoningItems?: boolean;
+  /** Exact Ark Kimi endpoint IDs requiring the narrow stateless Responses replay projection. */
+  arkKimiResponsesModels?: string[];
   /**
    * Explicit opt-in for a relay that genuinely fronts OpenAI and can decode native
    * compaction blobs. Absent or false degrades foreign blobs to an opaque note.
@@ -595,6 +617,14 @@ export interface OcxProviderConfig {
    */
   liveModels?: boolean;
   /**
+   * Per-provider live-discovery compatibility (#7910). `skipInvalidRows: true` skips individual
+   * `/models` rows whose id is missing, non-string, empty or otherwise invalid (and non-object
+   * rows) instead of rejecting the whole listing; a listing with no surviving row stays malformed.
+   * Absent or false keeps strict discovery. Unrelated to the top-level `OcxConfig.modelDiscovery`,
+   * which is persisted discovery state rather than provider configuration.
+   */
+  modelDiscovery?: { skipInvalidRows?: boolean };
+  /**
    * Per-provider catalog allowlist. When non-empty, ONLY these model ids are emitted to Codex's
    * catalog and `/v1/models` — live discovery still runs, this just narrows what ships (so a proxy
    * exposing thousands of models, or an aggregator like OpenRouter, doesn't bloat the catalog).
@@ -659,6 +689,12 @@ export interface OcxProviderConfig {
   modelContextTiers?: Record<string, "default" | "long_context">;
   /** Model-specific Codex catalog input modalities, e.g. ["text"] or ["text", "image"]. */
   modelInputModalities?: Record<string, string[]>;
+  /**
+   * Provider-wide input modalities, applied to models `modelInputModalities` does not enumerate
+   * (a live-discovered id, for example). The registry's value is applied at runtime only, for the
+   * preset's own destination, and never persisted; a per-model declaration still wins.
+   */
+  inputModalities?: string[];
   modelCapabilities?: Record<string, ModelCapabilities>;
   /** Model-specific max input token limits. Values cap auto_compact_token_limit. */
   modelMaxInputTokens?: Record<string, number>;
@@ -816,6 +852,14 @@ export interface OcxProviderConfig {
    */
   modelReasoningSummaryDelivery?: Record<string, ReasoningSummaryDelivery>;
   /**
+   * Anthropic adaptive `thinking.display` policy for this provider (#8363). `auto` and omission
+   * keep the built-in selection: native Opus 5.5 progress updates, summarized thinking elsewhere.
+   * `updates` is only sendable to native Opus 5.5 and degrades to `auto` for other models.
+   */
+  thinkingDisplay?: ThinkingDisplayPolicy;
+  /** Per-model override of `thinkingDisplay`, keyed by the exact upstream model id. */
+  modelThinkingDisplay?: Record<string, ThinkingDisplayPolicy>;
+  /**
    * Exact-model hosted tools that win collisions with Codex client tool declarations.
    * Use for non-forward Responses gateways that reserve a hosted tool namespace server-side.
    */
@@ -864,11 +908,32 @@ export interface OcxProviderConfig {
    */
   unsupportedHostedTools?: string[];
   /**
+   * Hosted tool declarations this Responses destination rejects only in combination with
+   * client tools, so they are stripped when the same request also declares a `function` or
+   * `custom` tool, or a namespace with members, in `tools`, a client-loaded
+   * `additional_tools` catalog, or a `tool_search_output` result. A request that declares
+   * only hosted tools keeps them.
+   *
+   * This describes a gateway that serves hosted `web_search` alone and function calling
+   * alone, but answers HTTP 400 when one request carries both (#8204). Same vocabulary and
+   * alias expansion as `unsupportedHostedTools`, which stays authoritative: a tool listed
+   * there is removed whether or not client tools are present.
+   */
+  unsupportedHostedToolsWithClientTools?: string[];
+  /**
    * Provider-local repair for Responses gateways whose lifecycle snapshots omit canonical
    * fields or closing events (#893). Disabled by default and applied only to client-facing
    * SSE/JSON; raw inspection state remains authoritative.
    */
   responsesSnapshotRepair?: boolean;
+  /**
+   * Infer the commentary/final_answer phase on assistant messages for Responses passthrough
+   * providers whose upstream omits it (e.g. third-party gateways). Codex desktop collapses
+   * commentary into progress rows; without this every narration renders fully expanded.
+   * Disabled by default. Applies in the client-facing SSE rewrite chain, including
+   * buffered JSON reconstructed from upstream SSE; ordinary upstream JSON is unchanged.
+   */
+  messagePhaseInference?: boolean;
   /**
    * Opt-in hosted-web-search bridge for this KEY-auth Responses passthrough provider (#3761).
    * Absent or disabled leaves the passthrough byte-identical to today.
@@ -890,7 +955,7 @@ export interface OcxProviderConfig {
    * `reasoningEffortMap`, resolved per model first.
    */
   modelReasoningEffortMap?: Record<string, Record<string, string>>;
-  /** OpenAI-compatible gateway reasoning wire shape. Default sends `reasoning_effort`. */
+  /** Chat gateway reasoning object; also opts custom Responses wires into `reasoning.enabled`. */
   reasoningWireFormat?: "gateway-object";
   /**
    * Model ids that do NOT support a reasoning/thinking parameter. The openai-chat adapter drops
@@ -987,6 +1052,8 @@ export interface OcxProviderConfig {
    * keeps its slot in the conversation.
    */
   foldDeveloperRoleToSystem?: boolean;
+  /** Merge text-only Chat instruction messages into one leading system message. LM Studio seeds true. */
+  singleLeadingSystemMessage?: boolean;
   /**
    * Opt-in: forward `prompt_cache_key` to the upstream `/chat/completions` body.
    * OpenAI-specific extension; strict backends (Groq, Cerebras, etc.) reject unknown
@@ -1114,7 +1181,7 @@ export interface OcxProviderConfig {
   googleMode?: "ai-studio" | "vertex" | "cloud-code-assist";
   /** Google tool-schema compatibility policy. Omitted preserves compatible report-only behavior. */
   googleToolSchemaPolicy?: "compatible" | "reject-lossy";
-  /** Vertex AI GCP project id. API keys use it to select the project endpoint; ADC falls back to GOOGLE_CLOUD_PROJECT / GCLOUD_PROJECT env. */
+  /** Vertex AI GCP project id. API keys use it to select the project endpoint; "auto" resolves each API key's own project. ADC falls back to GOOGLE_CLOUD_PROJECT / GCLOUD_PROJECT env. */
   project?: string;
   /** Vertex AI location, e.g. "us-central1" or "global". API-key project endpoints default to "global"; ADC falls back to GOOGLE_CLOUD_LOCATION env. */
   location?: string;

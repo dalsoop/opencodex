@@ -1,6 +1,12 @@
 import { ENCRYPTED_FUNCTION_OUTPUT_REJECTION, upstreamErrorMessageFromPayload } from "../../lib/errors";
 import { readBoundedResponseBody } from "../../lib/bounded-body";
-import { isReasoningEffortRejection } from "../../providers/reasoning-metadata";
+import { isHardPolicyOrOriginRefusal } from "../../lib/hard-refusal";
+import { isPlainObject } from "../../lib/plain-data";
+import {
+  hasConflictingReasoningEffortCode,
+  isReasoningEffortRejection,
+  planReasoningEffortDowngrade,
+} from "../../providers/reasoning-metadata";
 import { isAnthropicFastRefusal } from "../../providers/anthropic-fast";
 import type { AdapterRequest } from "../../adapters/base";
 import { isNonReplayableResponse } from "../../lib/upstream-retry";
@@ -62,6 +68,43 @@ export function outboundResponsesInput(bodyText: string | undefined): unknown[] 
   } catch {
     return undefined;
   }
+}
+
+/**
+ * The next published rung after an upstream reasoning-effort refusal, or undefined when no replay
+ * applies. A direct request repairs once. A combo candidate may walk the finite ladder one refused
+ * rung at a time: each refusal is learned, so a rung is never offered twice, and the request send
+ * budget bounds the walk (#8173). The caller sets `guard.attempted` when it actually replays.
+ */
+export async function refusedReasoningEffortDowngrade(
+  response: Response,
+  signal: AbortSignal,
+  guard: { attempted: boolean },
+  comboAttempt: boolean | undefined,
+  plan: Omit<Parameters<typeof planReasoningEffortDowngrade>[0], "rejectionText">,
+): Promise<ReturnType<typeof planReasoningEffortDowngrade>> {
+  if (guard.attempted && !comboAttempt) return undefined;
+  const rejectionText = await reasoningEffortRejectionText(response, false, signal);
+  return rejectionText === undefined
+    ? undefined
+    : planReasoningEffortDowngrade({ ...plan, rejectionText });
+}
+
+/**
+ * The passthrough rebuild serializes `_rawBody`, so a downgraded rung has to be written there as
+ * well or the replay resends the refused effort.
+ *
+ * Only shapes that already carry the control are rewritten. An absent `reasoning`, or one the
+ * caller sent as a string or `null`, is left exactly as it was: inventing `{ effort }` here would
+ * add a reasoning control to a body that never asked for one, and overriding a string would
+ * replace whatever that wire meant by it. `reasoning_effort` is kept in step only when present.
+ */
+export function withRawBodyReasoningEffort(rawBody: unknown, effort: string): unknown {
+  if (!isPlainObject(rawBody)) return rawBody;
+  const next: Record<string, unknown> = { ...rawBody };
+  if (isPlainObject(rawBody.reasoning)) next.reasoning = { ...rawBody.reasoning, effort };
+  if ("reasoning_effort" in rawBody) next.reasoning_effort = effort;
+  return next;
 }
 
 
@@ -259,8 +302,15 @@ export function isSelfIdentifiedOpaqueBlobRejection(bodyText: string): boolean {
       }
     }
 
-    // The flat stream-error envelope carries type/message at the top level rather than under
-    // an error object; the same anchored identity applies there.
+    // Flat SSE error events carry their code/message beside type:error, without a nested
+    // error object. Match only the same dedicated code or exact verification identity.
+    if ((record.error === undefined || record.error === null)
+      && (record.type === "error" || record.type === "invalid_request_error")
+      && (record.code === "invalid_encrypted_content" || ((record.code === null || record.code === undefined)
+        && typeof record.message === "string" && record.message.startsWith("The encrypted content ")
+        && record.message.endsWith(" could not be verified. Reason: Encrypted content could not be decrypted or parsed.")))) return true;
+
+    // The caller-mismatch identity also arrives as a flat typed error.
     if (
       record.type === "invalid_request_error"
       && typeof record.message === "string"
@@ -277,14 +327,14 @@ export function isSelfIdentifiedOpaqueBlobRejection(bodyText: string): boolean {
 
 
 /**
- * Opted-in native reasoning retention forwards ciphertext another model or account minted. ChatGPT
- * can refuse it inside a 200 stream -- a Codex WebSocket `error` frame or `response.failed` --
- * rather than as an HTTP 4xx, so the passthrough inspects the zero-output prelude of exactly these
- * requests. Ordinary turns keep the function-output-only inspection.
+ * Opaque state can be refused inside a 200 stream rather than as an HTTP 4xx. The passthrough
+ * inspects its bounded zero-output prelude even when a restored thread has no serving record;
+ * successful native ciphertext remains unchanged and blobless turns do not gain inspection.
  */
 export function retainedReasoningStreamCandidate(parsed: OcxParsedRequest, outboundBody: string | undefined): boolean {
-  return parsed._nativeReasoningRetainedAcrossRoute === true
-    && parsed._stripReasoningEncryptedContent !== true
+  // A restored thread has no process-local serving record. Inspect its actual outbound
+  // opaque state too; only an explicit zero-output rejection can authorize the rebuild.
+  return parsed._stripReasoningEncryptedContent !== true
     && outboundResponsesBodyCarriesOpaqueBlob(outboundBody);
 }
 
@@ -310,7 +360,7 @@ export function retainedReasoningStreamRejection(
 
 
 /**
- * Whether an upstream Responses 4xx authoritatively rejected opaque replay state.
+ * Whether an upstream Responses 4xx or explicitly identified 502 rejected opaque replay state.
  *
  * The outbound-body check is intentional: the inbound transcript may contain a proxy envelope or
  * compaction blob that the adapter already lowered, in which case a replay would be byte-identical.
@@ -329,8 +379,10 @@ export function shouldAttemptOpaqueBlobRecovery(args: {
   const acceptedStatus = (args.status >= 400 && args.status < 500)
     || (
       args.status === 502
-      && outboundResponsesBodyCarriesEncryptedFunctionOutput(args.outboundBody)
-      && isEncryptedFunctionOutputRejection(args.errorBody)
+      // Gateways can project a reasoning-only rejection as 502. The existing strict
+      // identity classifier below still excludes generic gateway/transport failures.
+      && (!isEncryptedFunctionOutputRejection(args.errorBody)
+        || outboundResponsesBodyCarriesEncryptedFunctionOutput(args.outboundBody))
     );
   return acceptedStatus
     && adapterSpeaksResponsesWire(args.adapterName)
@@ -356,7 +408,7 @@ export async function reasoningEffortRejectionText(
   if (response.status !== 400 && response.status !== 403) return undefined;
   try {
     const body = await readBoundedResponseBody(response.clone(), { signal });
-    if (!body.displaySafe || body.truncated) return undefined;
+    if (!body.displaySafe || body.truncated || isHardPolicyOrOriginRefusal(body.text) || hasConflictingReasoningEffortCode(body.text)) return undefined;
     return isReasoningEffortRejection(body.text) ? body.text : undefined;
   } catch {
     return undefined;
@@ -538,6 +590,7 @@ export async function attemptOpaqueBlobRecovery<Failure = Response>(
   const rejectedScope = args.parsed._reasoningReplayScope
     ? {
         clientThreadId: args.parsed._reasoningReplayScope.clientThreadId,
+        clientPrincipalId: args.parsed._reasoningReplayScope.clientPrincipalId,
         ...(args.parsed._reasoningReplayScope.current
           ? { current: { ...args.parsed._reasoningReplayScope.current } }
           : {}),

@@ -12,20 +12,27 @@ import { antigravityCliUserAgent, antigravityUserAgent } from "./client-fingerpr
 export const ANTIGRAVITY_REQUEST_UA = antigravityUserAgent();
 
 /**
- * Antigravity CLI User-Agent. CCA serves Gemini 4 Argon only to the CLI client family, and it
- * 404s other agent models (`gemini-3.7-flash-tiered`, `gemini-3.1-pro-low`) under it, so the
- * choice is per wire model: see `antigravityUserAgentForWireModel`.
+ * Antigravity CLI User-Agent. CCA serves the Gemini 4 codename models (Argon, Carbon) only to the
+ * CLI client family, and it 404s other agent models (`gemini-3.7-flash-tiered`,
+ * `gemini-3.1-pro-low`) under it, so the choice is per wire model: see
+ * `antigravityUserAgentForWireModel`.
  */
 export const ANTIGRAVITY_CLI_REQUEST_UA = antigravityCliUserAgent();
 
 /**
- * Model discovery (`:fetchAvailableModels`) uses the CLI UA so Argon's wire ids are listed;
+ * Model discovery (`:fetchAvailableModels`) uses the CLI UA so the Gemini 4 wire ids are listed;
  * under the IDE UA they are absent.
  */
 export const ANTIGRAVITY_DISCOVERY_UA = ANTIGRAVITY_CLI_REQUEST_UA;
 
-/** Wire ids CCA serves only to the CLI client family (verified 2026-10-14). */
-const ANTIGRAVITY_CLI_ONLY_WIRE_MODEL = /^gemini-4-argon(?:-(?:low|medium|high))?$/;
+/**
+ * Wire ids CCA serves only to the CLI client family: every Gemini 4 codename, bare or with a tier
+ * suffix. Argon was verified 2026-10-14. On 2026-11-11 the CLI discovery list was exactly the IDE
+ * list plus the Argon and Carbon tiers, and `gemini-4-carbon-medium` 404'd under the IDE UA while
+ * answering 200 under the CLI UA. Matching the generation keeps a newly discovered codename
+ * callable instead of listing it in the picker and 404ing every request.
+ */
+const ANTIGRAVITY_CLI_ONLY_WIRE_MODEL = /^gemini-4-[a-z][a-z0-9]*(?:-(?:low|medium|high))?$/;
 
 /** The User-Agent an Antigravity inference request for `wireModelId` must carry. */
 export function antigravityUserAgentForWireModel(wireModelId: string): string {
@@ -54,7 +61,7 @@ export function isLikelyRealThoughtSignature(sig: string | undefined): boolean {
   // signature exists. It is alphanumeric with underscores, so it would otherwise satisfy every
   // check below and be re-ingested as genuine — cached, replayed, and eventually treated as
   // evidence that a turn was signed. It is never a real signature.
-  if (sig === "skip_thought_signature_validator") return false;
+  if (sig === "skip_thought_signature_validator" || sig === "context_engineering_is_the_way_to_go") return false;
   // Reject synthetic Responses/tool-call ids and Anthropic tool-use ids (`_` or `-` separators).
   if (/^(fc|ctc|tsc|call|msg|rs|resp|reasoning|item|ws|toolu|tool|func|function)[-_]/i.test(sig)) return false;
   // Real Gemini thought signatures are opaque base64/base64url blobs: only [A-Za-z0-9+/_=-].
@@ -80,7 +87,7 @@ function firstUserText(parsed: OcxParsedRequest): string | undefined {
  * CLIProxyAPI `generateStableSessionID`: sha256(firstUserText) → BigEndian uint64 masked with
  * 0x7FFFFFFFFFFFFFFF, prefixed with "-". Falls back to a random "-<digits>" id when there is no text.
  */
-export function antigravitySessionId(parsed: OcxParsedRequest): string {
+export function antigravitySessionId(parsed: OcxParsedRequest, accountScope?: string): string {
   // The id must be IDENTICAL on turn N and turn N+1: the replay cache observes thought signatures
   // on turn N's response and re-injects them on turn N+1's request, so a changing id loses the
   // association entirely. (A *shared* id does not — signatures are keyed on functionCall identity,
@@ -103,7 +110,12 @@ export function antigravitySessionId(parsed: OcxParsedRequest): string {
   // repair, not a universal one.
   const text = codexThreadAnchor(parsed).preimage ?? firstUserText(parsed);
   if (!text) return `-${Math.floor(Math.random() * 9e18).toString()}`;
-  const digest = createHash("sha256").update(text, "utf8").digest();
+  const scope = parsed._reasoningReplayScope?.current?.credentialDurableIdentity?.trim()
+    || parsed._reasoningReplayScope?.current?.credentialIdentity?.trim()
+    || accountScope?.trim()
+    || "";
+  const preimage = scope ? `acct:${scope}\0${text}` : text;
+  const digest = createHash("sha256").update(preimage, "utf8").digest();
   const masked = digest.readBigUInt64BE(0) & 0x7fffffffffffffffn;
   return `-${masked.toString()}`;
 }

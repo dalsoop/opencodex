@@ -15,7 +15,7 @@ import {
   CODEBUDDY_TOOL_LIMITS,
 } from "../codebuddy/tool-bridge";
 import { CLAUDE_CLI_PROFILES, type ClaudeCliProfile } from "./profiles";
-import { checkClaudeUsageAdmission, recordClaudeUsageRefusal, type ClaudeAdmission } from "./usage-admission";
+import { checkClaudeUsageAdmission, containsClaudeResetClock, recordClaudeUsageRefusal, type ClaudeAdmission } from "./usage-admission";
 import { buildStableClaudeConversationInput, CLAUDE_REPLAY_SYSTEM_PROMPT, stableClaudeToolBridge } from "./stable-replay";
 
 // The coding-agent bridge is protocol-level infrastructure shared with CodeBuddy. Its MCP server
@@ -149,22 +149,6 @@ export function buildArgs(
 }
 
 /**
- * Refuse image input the way the Qoder presets do.
- *
- * The CLI parses an image frame in its stream-json input without complaint (verified against
- * 2.1.270), but nothing verifies that a headless turn hands those bytes to the model, and an image
- * the harness drops produces a confident answer to the wrong question. v1 therefore publishes
- * text-only models — `noVisionModels` on the registry row — and refuses a direct image here; an
- * operator with the vision sidecar on the request path still gets images captioned into text before
- * they reach this adapter.
- */
-function hasImageInput(parsed: OcxParsedRequest): boolean {
-  return parsed.context.messages.some(message =>
-    Array.isArray(message.content) && message.content.some(part => part.type === "image"),
-  );
-}
-
-/**
  * Turn the CLI's unauthenticated turn into the one action a subscription user can take.
  *
  * An unauthenticated `claude` does not fail the process: it emits an ordinary terminal `result`
@@ -213,15 +197,11 @@ export function createClaudeCliAdapter(provider: OcxProviderConfig, deps: Claude
         emit({ type: "error", message: admission.message ?? "Claude subscription usage is exhausted; launches are paused until the reset.", status: 429, errorType: "rate_limit_error", code: "claude_subscription_cooldown", retryable: false });
         return;
       }
-      if (hasImageInput(parsed)) {
-        emit({
-          type: "error",
-          message: "Claude Code CLI image input is not enabled because the CLI provider route has no verified multimodal contract.",
-          status: 400,
-          errorType: "invalid_request_error",
-          code: "unsupported_input_modality",
-          retryable: false,
-        });
+      // Developer instructions are folded into a text-only system prompt, not replayed as user data.
+      if (parsed.context.messages.some(message => message.role === "developer"
+        && Array.isArray(message.content) && message.content.some(part => part.type === "image"))) {
+        emit({ type: "error", message: "Claude Code CLI does not support images in developer instructions.",
+          status: 400, errorType: "invalid_request_error", code: "unsupported_input_modality", retryable: false });
         return;
       }
       let bridge;
@@ -286,12 +266,18 @@ export function createClaudeCliAdapter(provider: OcxProviderConfig, deps: Claude
           provider,
           parsed,
           incoming,
-          emit: withClaudeLoginHint(event => {
-            if (event.type === "error") {
-              void Promise.resolve((deps.usageRefusal ?? recordClaudeUsageRefusal)(event.message)).catch(() => {});
-            }
-            emit(event);
-          }),
+          emit: withClaudeLoginHint(emit),
+          onCliOutputError: message => {
+            // The model id is caller input that reaches the CLI verbatim, and the CLI may reflect it
+            // inside its own error wording. When the model id itself carries the reset-clock
+            // phrase the refusal parser honors, a parsed reset cannot be attributed to the
+            // account — it may be the model string echoed back rather than a limit Claude
+            // reported — so this turn's output records nothing. The error still reaches the
+            // client and limits the preflight already knows still gate; a genuine limit seen
+            // only on such a turn is delivered but deliberately not cached.
+            if (containsClaudeResetClock(parsed.modelId)) return;
+            void Promise.resolve().then(() => (deps.usageRefusal ?? recordClaudeUsageRefusal)(message)).catch(() => {});
+          },
           ...(toolBridge ? { toolBridge } : {}),
           conversationInput: buildStableClaudeConversationInput,
           buildArgs: (profile, req, prov) => buildArgs(profile as ClaudeCliProfile, req, prov, promptFile),

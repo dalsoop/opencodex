@@ -10,10 +10,10 @@ description: SSH로 OpenCodex Home 컴퓨터와 Child 컴퓨터를 연결합니�
 - Home 컴퓨터에서 OpenSSH 키 로그인으로 Child 컴퓨터에 접속할 수 있어야 합니다.
 - 자식이 시작하는 링크에서는 자식에서 OpenSSH 키 로그인으로 홈에 접속할 수 있어야 합니다(비밀번호 로그인은 지원하지 않음).
 - Child 컴퓨터에 OpenCodex 2.66.0 이상이 설치되어 있어야 합니다(자식이 시작하는 링크에서는 Home에도).
-- 두 컴퓨터 모두 macOS 또는 Linux여야 합니다.
+- 두 컴퓨터는 macOS, Linux 또는 Windows x64를 사용할 수 있습니다. Windows에는 OpenSSH Server와 Windows PowerShell이 필요하며 Git Bash와 curl은 필요하지 않습니다.
 - Home에서 Child를 추가하는 대시보드는 Home에서 직접 열거나 페어링된 Hub 세션을 사용해야 합니다. 현재 컴퓨터를 Child로 전환하려면 운영자가 페어링한 대시보드 세션이 필요하며, 자격 증명 없이 발급된 로컬 세션은 이 라우팅 변경을 확정할 수 없습니다.
 
-비밀번호 SSH와 Windows는 현재 흐름에서 지원하지 않습니다. 링크는 어느 쪽에서든 시작할 수 있습니다. 아래 순서대로 Home에서 시작하거나, 이어지는 "이 컴퓨터를 Child로 연결하기" 절처럼 Child에서 시작합니다.
+비밀번호 SSH는 지원하지 않습니다. Home 또는 Child에서 링크를 시작할 수 있습니다. Windows는 동일하게 고정된 OpenSSH 연결을 통해 PowerShell을 실행합니다.
 
 ## `#remote`에서 Child 추가하기
 
@@ -55,18 +55,18 @@ Home의 프로바이더를 사용할 컴퓨터에서 다음을 진행합니다.
 
 - **Connected**는 SSH 터널이 준비되어 Child가 Home 링크를 사용할 수 있다는 뜻입니다.
 - **Reconnecting**은 터널을 다시 연결하는 중이라는 뜻입니다. 재시도 중에는 요청이 일시적으로 `Retry-After`와 함께 `503`을 반환할 수 있습니다. 자기 대시보드에서 연결한 Child에서는 요청이 먼저 터널이 돌아오기를 최대 15초 기다립니다.
-- **Failed**는 조치가 필요하다는 뜻입니다. SSH 인증, 확인한 호스트 키, 포워딩 또는 타임아웃 사유를 확인하세요. SSH 터널을 띄운 쪽이 절전, 장애, 재시작 뒤에도 스스로 다시 시도합니다. Home이 추가한 Child라면 Home이, 자기 대시보드에서 연결한 Child라면 Child가 시도합니다. 타임아웃이나 포워딩 오류 뒤에는 약 1분마다, 인증 오류 뒤에는 5분마다 시도합니다. 호스트 키가 바뀐 경우에는 다시 시도하지 않습니다. 바로 다시 연결하려면 Home 대시보드에서 **Retry**를 누르거나 Home에서 `ocx link reconnect --link-id <id>`를 실행하세요. OpenCodex를 재시작하지 않고 그 링크의 터널만 다시 띄웁니다.
+- **Failed**는 조치가 필요하다는 뜻입니다. SSH 인증, 확인한 호스트 키, 포워딩 또는 타임아웃 사유를 확인하세요. SSH 터널을 띄운 쪽이 절전, 장애, 재시작 뒤에도 스스로 다시 시도합니다. Home이 추가한 Child라면 Home이, 자기 대시보드에서 연결한 Child라면 Child가 시도합니다. 타임아웃이나 포워딩 오류 뒤에는 1분 뒤에 다시 시도하고, 다시 실패할 때마다 간격을 두 배로 늘려 최대 5분마다 시도합니다. 인증 오류 뒤에는 5분마다 시도합니다. 호스트 키가 바뀐 경우에는 다시 시도하지 않습니다. 바로 다시 연결하려면 Home 대시보드에서 **Retry**를 누르거나 Home에서 `ocx link reconnect --link-id <id>`를 실행하세요. OpenCodex를 재시작하지 않고 그 링크의 터널만 다시 띄웁니다.
 
 링크가 실패해도 로컬 프로바이더로 조용히 전환하지 않습니다.
 
 ## Child 제거하기
 
-Child의 **Disconnect**를 선택하고 alias를 확인합니다. Home은 터널을 중지하고 해당 Child의 링크 키를 폐기한 뒤 저장된 링크 기록을 삭제합니다.
+Child의 **Disconnect**를 선택하고 alias를 확인합니다. Home은 터널을 중지하고 해당 Child의 링크 키를 폐기한 뒤 저장된 링크 기록을 삭제합니다. 경량 에이전트(`ocx-child`)로 연결된 Child는 기본적으로 빠른 재연결을 위해 `~/.cache/opencodex/bin/ocx-child` 파일을 남겨두며, 확인 대화상자에서 **심어둔 경량 에이전트 파일까지 원격 컴퓨터에서 함께 삭제**를 선택하거나 `ocx link revoke --link-id <id> --purge`를 실행하면 에이전트 파일까지 함께 삭제합니다. Home은 이 삭제를 `PATH`에 있는 다른 `ocx-child`가 아니라 `~/.cache/opencodex/bin/ocx-child`(Windows에서는 `%LOCALAPPDATA%\opencodex\bin\ocx-child.exe`)에 심어둔 파일로 실행합니다. 그 파일이 없거나 Child가 파일을 삭제했다고 확인하지 않으면 Disconnect는 오류를 보고하고 링크를 그대로 남겨 두므로, 다시 시도하거나 삭제 옵션 없이 연결을 해제하거나 파일을 직접 지울 수 있습니다. `--purge`는 경량 Child에만 적용됩니다. 전체 OpenCodex 설치에서는 Home이 거부하고, Home이 Child 종류를 기록하기 전에 저장된 링크라면 먼저 Child를 확인합니다.
 
 Home에서 Child의 연결 해제 명령을 실행할 수 없으면 **Remove here only**를 선택합니다. 그러면 이 컴퓨터의 터널, 키, 기록만 삭제됩니다. 그 다음 Child에 로그인하여 실행합니다.
 
 ```bash
-ocx disconnect
+ocx disconnect   # 경량 모듈 Child인 경우 ~/.cache/opencodex/bin/ocx-child detach
 ```
 
 자식 연결을 끊으려면 자식에서 `ocx disconnect`를 실행합니다. 이 명령은 클라이언트 터널을 끊고 SSH를 통해 홈에서 링크를 폐기합니다. 홈에서 폐기하지 못하면 다음 문구를 출력합니다: `Home revoke failed; run ocx link revoke --link-id <linkId> on the home.`
@@ -79,15 +79,18 @@ Child는 링크를 통해 Home 컴퓨터의 프로바이더와 프로바이더 �
 
 ```text
 ocx link probe <alias> [--json]
-ocx link add <alias> [--expect-fingerprint SHA256:…] [--json]
+ocx link add <alias> [--plant] [--expect-fingerprint SHA256:…] [--json]
 ocx link port [--json]
 ocx link issue --alias <alias> --tunnel-port <port> [--json]
 ocx link status [--json]
-ocx link revoke --link-id <id> [--json]
+ocx link revoke --link-id <id> [--purge] [--force --yes] [--json]
 ocx link reconnect --link-id <id> [--json]
+ocx link check (--link-id <id> | --all) [--no-wait] [--json]
 ```
 
 비대화형 실행(TTY 없음)에서는 `--expect-fingerprint`가 필수입니다. 대화형 터미널에서는 옵션을 생략할 수 있지만, 제시된 지문을 명시적으로 확인해야 합니다.
+
+Home에서 `ocx link check (--link-id <id> | --all)`를 실행하면 Home이 추가한 각 Child의 설치 버전, 설치 종류, 업데이트 경로를 읽습니다. 링크의 SSH로 Child의 `ocx update --plan`을 실행하며(Child마다 60초, 동시에 세 대), 이 명령은 계획만 계산하고 아무것도 바꾸지 않습니다. 2.97.0보다 오래된 Child는 `owner-action`(`legacy-ocx`)으로 표시되고, 버전은 macOS와 Linux에서는 읽기 전용 SSH 호출을 한 번 더 해서, Windows에서는 링크로 보고된 버전에서 가져옵니다. Child 쪽에서 연결한 링크와 `ocx-child` Child는 SSH 없이 보고됩니다. `ocx link status --json`은 각 행에 `child` 블록(버전, 버전 차이, 카탈로그 최신 여부, 활동, 마지막 작업)을 추가합니다. 자세한 내용과 종료 코드는 [Child install, catalog and activity](/guides/remote-link/#child-install-catalog-and-activity)(영문)를 참고하세요.
 
 ## 관련 가이드
 
@@ -99,7 +102,7 @@ ocx link reconnect --link-id <id> [--json]
 
 OpenCodex가 백그라운드 서비스로 실행 중이어도 기존 `ocx gui pair --origin <로컬 주소>` 명령을 사용할 수 있습니다. 서비스의 개인 OpenCodex 폴더를 소유한 계정으로 명령을 실행하고, 반환된 일회용 코드를 로컬 대시보드에 입력하세요. 서버 터미널, 추가 비밀번호, Windows Hello 또는 하드웨어 보안키가 필요하지 않습니다. CLI와 서버는 같은 최신 버전과 설정 폴더를 사용해야 하며, 업데이트 뒤에는 이전 서버를 재시작하세요. Hub 초대도 CLI와 서버의 버전이 다르면 함께 업데이트해야 합니다. 설정 폴더나 일회용 승인 폴더가 심볼릭 링크이면 페어링을 거부하므로, `OPENCODEX_HOME`에는 보호된 실제 폴더 경로를 지정하세요.
 
-CLI는 짧게 유효한 일회용 승인 정보를 만들고, 사용하거나 실패하면 정리를 시도합니다. 실행 정보를 읽는 것만으로는 승인받을 수 없고, 검증에 필요한 원래 비밀값은 파일에 저장하지 않습니다. 이 방식은 개인 폴더의 쓰기 권한을 확인하는 것으로, 생체 인증이나 사람의 직접 승인을 증명하지는 않습니다. 사용자 파일을 자유롭게 수정할 수 있는 프로그램은 여전히 신뢰 범위 안에 있습니다. 기존 Hub 초대의 권한 정책은 바뀌지 않습니다. 페어링 요청이 실패하면 안내된 문제를 해결한 뒤 새 명령을 실행하세요. Windows의 SSH Remote Link 지원을 추가하는 변경은 아닙니다.
+CLI는 짧게 유효한 일회용 승인 정보를 만들고, 사용하거나 실패하면 정리를 시도합니다. 실행 정보를 읽는 것만으로는 승인받을 수 없고, 검증에 필요한 원래 비밀값은 파일에 저장하지 않습니다. 이 방식은 개인 폴더의 쓰기 권한을 확인하는 것으로, 생체 인증이나 사람의 직접 승인을 증명하지는 않습니다. 사용자 파일을 자유롭게 수정할 수 있는 프로그램은 여전히 신뢰 범위 안에 있습니다. 기존 Hub 초대의 권한 정책은 바뀌지 않습니다. 페어링 요청이 실패하면 안내된 문제를 해결한 뒤 새 명령을 실행하세요. Windows의 SSH Remote Link는 위에서 설명한 별도의 PowerShell 실행 경로를 사용합니다.
 
 페어링 도중 프로세스가 중단되면 명령을 다시 실행해 새로운 승인을 받으세요. 서비스나 페어링 명령이 실행 중일 때는 페어링 상태 파일을 수동으로 제거하지 마세요.
 

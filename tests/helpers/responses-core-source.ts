@@ -11,6 +11,8 @@ export const RESPONSES_CORE_MODULES = [
   "compaction-retention.ts",
   "core-options.ts",
   "native-response-control.ts",
+  "native-continuation-refusal.ts",
+  "native-continuation-send.ts",
   "native-tool-results.ts",
   "native-response-output.ts",
   "native-response-json.ts",
@@ -35,9 +37,14 @@ export const RESPONSES_CORE_MODULES = [
   "core-combo-native.ts",
   // Reached from core-combo.ts: tool-loop continuations stay on the lane's previous target (#7298).
   "combo-tool-loop-pin.ts",
+  // Reached from core-combo.ts: opt-in JEV session pin keeps a session on its decided target (#7525).
+  "jev-session-pin.ts",
   // Reached from core-combo.ts: the JEV model backend's internal decision turn.
   "jev-model-invoke.ts",
+  // Reached from core-combo.ts: JEV effort choices and resolved native quota identity.
+  "jev-combo-choice.ts",
   "request-prepare.ts",
+  "turn-membership.ts",
   "policy-request-scope.ts",
   "skills-snapshot.ts",
   "shadow-target-availability.ts",
@@ -47,20 +54,34 @@ export const RESPONSES_CORE_MODULES = [
   "compaction-recovery-policy.ts",
   "memory-models.ts",
   "request-transport.ts",
+  // Reached from request-transport.ts: opt-in DeepSeek upload-backed image replay.
+  "deepseek-image-files.ts",
   "request-sidecar-auth.ts",
   "response-effects.ts",
   "response-tool-ownership.ts",
   "request-send-budget.ts",
+  "request-spend.ts",
+  "request-spend-target.ts",
   "account-auto-pause-recovery.ts",
   "passthrough-execution.ts",
   "passthrough-dispatch.ts",
+  "passthrough-build-error.ts",
+  // Reached from passthrough-dispatch.ts: exact-URL OpenGateway empty-completion recovery.
+  "passthrough-completion.ts",
+  "opengateway-completion-guard.ts",
   "passthrough-observations.ts",
+  "passthrough-key-rotation.ts",
   // Reached from passthrough/adapter dispatch, compact and runTurn: local spend-ledger refusal mapping.
   "spend-storage-error.ts",
   // Reached from passthrough dispatch: local pacing refusals retain 429 and Retry-After.
   "pacing-overload.ts",
   "reset-replay.ts",
   "passthrough-delivery.ts",
+  // Reached from passthrough-delivery.ts: buffered combo children must honor a required tool_choice (#7456).
+  "combo-required-tool-contract.ts",
+  // Reached from passthrough-delivery.ts: streaming combo children enforce the caller's required tool (#7456).
+  "combo-required-tool-stream.ts",
+  "combo-required-tool-fulfillments.ts",
   "buffered-sse-json.ts",
   "terminal-error-redaction.ts",
   "non-replayable-error.ts",
@@ -69,7 +90,10 @@ export const RESPONSES_CORE_MODULES = [
   "completion-policy.ts",
   "run-turn-execution.ts",
   "adapter-dispatch.ts",
+  // Reached from adapter-dispatch.ts: the non-2xx upstream message this proxy composes (#8352).
+  "adapter-failure-message.ts",
   "antigravity-validation-refusal.ts",
+  "antigravity-model-denial-recovery.ts",
   "adapter-continuation.ts",
   "adapter-delivery.ts",
   "anthropic-thinking-recovery.ts",

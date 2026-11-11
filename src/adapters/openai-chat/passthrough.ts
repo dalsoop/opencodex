@@ -1,8 +1,11 @@
+import { applyChatDestinationPolicy, mistralNativeChatEffort } from "./destination-policy";
 import { protectGlmSummaryBudget } from "./summary-budget";
 import { openAIChatTransport, stripBracketedModelSuffix } from "./wire";
 import type { AdapterRequest } from "../base";
 import { frameAgentRouterMessages } from "../agentrouter";
 import { applyExplicitChatDeveloperRole } from "./developer-role";
+import { singleLeadingSystemMessages } from "./single-system";
+import { limitMistralChatImages } from "./mistral-image-limit";
 import { openRouterProviderPayload, resolveOpenRouterRouting } from "../../providers/openrouter-routing";
 import { resolveVercelGatewayRouting, vercelGatewayProviderPayload } from "../../providers/vercel-gateway-routing";
 import { fastPolicyForModel } from "../../providers/service-tier";
@@ -10,12 +13,18 @@ import { applyGithubCopilotContextTier } from "../../providers/github-copilot-co
 import { canonicalFastTierMarker, decideTier, type ResolvedFastPolicy } from "../../providers/fastwire";
 import { debugProviderDiagnostic } from "../../lib/debug";
 import { isDebugEnabled } from "../../lib/debug-settings";
-import { modelRecordValue } from "../../reasoning-effort";
 import { modelInList, type OcxProviderConfig } from "../../types";
+import { mapReasoningEffort, modelRecordValue } from "../../reasoning-effort";
+import { resolveReasoningCapabilities } from "../../providers/reasoning-capabilities";
 import { chatParallelToolCallsWireValue } from "./parallel-tool-calls";
-import { applyExplicitChatReasoningWirePolicy } from "./reasoning-wire";
-import { replayNativeChatReasoning } from "./reasoning-replay";
+import { applyExplicitChatReasoningWirePolicy, declaresIndependentChatReasoningControls,
+  nativeChatUltraWireEffort } from "./reasoning-wire";
+import { declaresThinkingToggleWire, reasoningControlsAreUnsupported } from "../reasoning-controls";
+import { planNativeChatReasoningReplay } from "./reasoning-replay";
 import type { OcxReasoningReplayScopeRef } from "../../types";
+import { jsonUtf8Bytes } from "../../lib/json-byte-size";
+import { isTranslatorBudgetExceededError, TRANSLATOR_MAX_TURN_BYTES, TranslatorBudgetExceededError,
+  type TranslatorBudget } from "../../lib/translator-budget";
 
 const CHAT_PASSTHROUGH_FIELDS = [
   "audio",
@@ -58,6 +67,8 @@ export function buildOpenAIChatPassthroughRequest(
   fastMode?: boolean,
   providerName?: string,
   replayScope?: OcxReasoningReplayScopeRef,
+  maxSerializedBytes = TRANSLATOR_MAX_TURN_BYTES,
+  translatorBudget?: TranslatorBudget,
 ): AdapterRequest {
   const { url, headers, hasCredential } = openAIChatTransport(provider);
 
@@ -70,34 +81,64 @@ export function buildOpenAIChatPassthroughRequest(
     // and the conversion changes the role of those messages and nothing else, so the position
     // of every message and every other field survive unchanged. Missing thinking history is
     // repaired below using the same preserve policy as the translated Chat builder.
-    messages: applyExplicitChatDeveloperRole(
+    // The explicit single-system policy can then merge instruction slots, and Mistral's
+    // per-request image cap applies as it does to translated Chat.
+    messages: limitMistralChatImages(singleLeadingSystemMessages(applyExplicitChatDeveloperRole(
       frameAgentRouterMessages(provider.baseUrl, rawBody.messages),
       provider,
-    ),
+    ), provider), provider, modelId),
     stream,
   };
   for (const field of CHAT_PASSTHROUGH_FIELDS) {
     if (rawBody[field] !== undefined) body[field] = rawBody[field];
   }
-  body.messages = replayNativeChatReasoning(body.messages, provider, modelId, replayScope,
-    Array.isArray(rawBody.tools) && rawBody.tools.length > 0);
+  const replayPlan = planNativeChatReasoningReplay(body.messages, provider, modelId, replayScope,
+    Array.isArray(rawBody.tools) && rawBody.tools.length > 0, maxSerializedBytes);
   if (protectGlmSummaryBudget(body, provider.baseUrl, body.reasoning_effort)) body.reasoning_effort = "low";
+  const toggleWire = declaresThinkingToggleWire(provider, modelId);
+  const independentControls = declaresIndependentChatReasoningControls(provider, modelId);
   const rawEfforts = modelRecordValue(provider.modelReasoningEfforts, modelId) ?? provider.reasoningEfforts;
-  const reasoningDisabled = modelInList(provider.noReasoningModels, modelId) || rawEfforts?.length === 0;
+  const reasoningDisabled = modelInList(provider.noReasoningModels, modelId)
+    || (!toggleWire && rawEfforts?.length === 0) || reasoningControlsAreUnsupported(provider, modelId);
   if (reasoningDisabled) {
     delete body.reasoning_effort;
   }
+  if (body.reasoning_effort === "ultra") {
+    const folded = nativeChatUltraWireEffort(provider, modelId);
+    if (folded === undefined) delete body.reasoning_effort;
+    else body.reasoning_effort = folded;
+  }
+  if (typeof body.reasoning_effort === "string") {
+    const effort = mistralNativeChatEffort(provider, modelId, body.reasoning_effort);
+    if (effort === undefined) delete body.reasoning_effort;
+    else body.reasoning_effort = effort;
+  }
   const hasTools = Array.isArray(rawBody.tools) && rawBody.tools.length > 0;
   const requestedEffort = typeof body.reasoning_effort === "string" ? body.reasoning_effort : undefined;
-  applyExplicitChatReasoningWirePolicy({
+  const explicitThinkingEnabled = rawBody.reasoning !== null && typeof rawBody.reasoning === "object"
+    && typeof (rawBody.reasoning as { enabled?: unknown }).enabled === "boolean"
+    ? (rawBody.reasoning as { enabled: boolean }).enabled
+    : undefined;
+  const explicitReasoning = applyExplicitChatReasoningWirePolicy({
     provider,
     modelId,
     hasTools,
+    thinkingEnabled: explicitThinkingEnabled,
     requestedEffort,
-    wireEffort: requestedEffort,
+    wireEffort: toggleWire && independentControls ? mapReasoningEffort(provider, modelId, requestedEffort) : requestedEffort,
     reasoningDisabled,
     body,
   });
+  let reasoningLog = explicitReasoning.handled ? explicitReasoning.reasoningLog : undefined;
+  // A native caller's own thinking object is already in the upstream wire shape. Forward it only
+  // on a provider-declared toggle wire, below an explicit reasoning.enabled but above a default.
+  if (!reasoningDisabled && toggleWire && independentControls
+    && resolveReasoningCapabilities(provider, modelId).supportsThinkingToggle !== false
+    && explicitThinkingEnabled === undefined
+    && rawBody.thinking !== undefined) {
+    body.thinking = rawBody.thinking;
+    reasoningLog = undefined;
+  }
 
   const openRouterRouting = resolveOpenRouterRouting(provider, modelId);
   if (openRouterRouting) body.provider = openRouterProviderPayload(openRouterRouting);
@@ -161,7 +202,34 @@ export function buildOpenAIChatPassthroughRequest(
     body.stream_options = rawBody.stream_options;
   }
 
-  const bodyJson = JSON.stringify(applyGithubCopilotContextTier(body, provider, modelId, providerName));
+  applyChatDestinationPolicy(body, provider);
+  const transformedBody = () => applyGithubCopilotContextTier(body, provider, modelId, providerName);
+  // The binding constraint is the final size base + net, so a shrinking replay may legitimately
+  // measure a base above the cap; only a base above max - net makes the result unserializable.
+  let baseBytes = 0;
+  try {
+    baseBytes = jsonUtf8Bytes(transformedBody(), maxSerializedBytes - replayPlan.serializedBytes);
+  } catch (error) {
+    if (isTranslatorBudgetExceededError(error)) {
+      throw new TranslatorBudgetExceededError("request_copies", maxSerializedBytes);
+    }
+    throw error;
+  }
+  if (replayPlan.serializedBytes > maxSerializedBytes - baseBytes) {
+    throw new TranslatorBudgetExceededError("request_copies", maxSerializedBytes);
+  }
+  const preSerialization = translatorBudget?.reserveTransient(baseBytes + replayPlan.serializedBytes, {
+    kind: "request_copies",
+  });
+  let bodyJson: string;
+  try {
+    if (replayPlan.hasChanges) {
+      body.messages = replayPlan.apply();
+    }
+    bodyJson = JSON.stringify(transformedBody());
+  } finally {
+    preSerialization?.release();
+  }
 
   if (isDebugEnabled()) {
     let host = "upstream";
@@ -177,5 +245,8 @@ export function buildOpenAIChatPassthroughRequest(
     });
   }
 
-  return { url, method: "POST", headers, body: bodyJson };
+  return {
+    url, method: "POST", headers, body: bodyJson,
+    ...(reasoningLog ? { reasoningLog } : {}),
+  };
 }

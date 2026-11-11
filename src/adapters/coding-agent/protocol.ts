@@ -258,7 +258,7 @@ export interface StreamParseState {
   translatorBudget?: TranslatorBudget;
   /** A capture bridge may impose a tighter ceiling on distinct calls and retained blocks. */
   maxToolBlockStarts?: number;
-  /** Qoder's isolated CLI names, validated at partial block start before retaining anything. */
+  /** Qoder's accepted CLI names to selected wire identities; validates partial starts and alias deduplication. */
   toolBridgeNames?: ReadonlyMap<string, string>;
   /** Set before an over-limit block can be allocated or emitted. */
   toolCallLimitExceeded?: boolean;
@@ -464,7 +464,10 @@ function resolveToolBlockKey(state: StreamParseState, event: StreamMessage): num
 function isEmittedToolCallRepeat(state: StreamParseState, id: string, name: string, argumentsJson: string): boolean {
   const previous = state.emittedToolCalls?.get(id);
   if (!previous) return false;
-  if (previous.name !== name || previous.argumentsJson !== argumentsJson) {
+  const selectedName = state.toolBridgeNames?.get(name);
+  const sameName = previous.name === name
+    || (selectedName !== undefined && selectedName === state.toolBridgeNames?.get(previous.name));
+  if (!sameName || previous.argumentsJson !== argumentsJson) {
     throw new CodingAgentProtocolError("Coding-agent CLI reused a completed tool call ID with conflicting name or input.");
   }
   return true;
@@ -594,7 +597,9 @@ function mapRawStreamEvent(event: StreamMessage, state: StreamParseState): Adapt
           throw new CodingAgentProtocolError("Coding-agent CLI started a tool block with an invalid or undeclared name.");
         }
         const previous = state.emittedToolCalls?.get(id);
-        if (previous && previous.name !== name) {
+        const selectedName = state.toolBridgeNames?.get(name);
+        if (previous && previous.name !== name
+          && (selectedName === undefined || selectedName !== state.toolBridgeNames?.get(previous.name))) {
           throw new CodingAgentProtocolError("Coding-agent CLI reused a completed tool call ID with conflicting name or input.");
         }
         const distinctIds = state.completeAssistantToolUse ? (state.partialToolCallIds ??= new Set<string>()) : undefined;
@@ -724,18 +729,23 @@ function textPart(text: string): WireContentPart {
 }
 
 /** Encode an OpenCodex image content part as an Anthropic base64/url image block; never drop it. */
-function imagePart(imageUrl: string): WireContentPart | undefined {
+export function imagePart(imageUrl: string): WireContentPart | undefined {
   const match = /^data:([^;]+);base64,(.+)$/s.exec(imageUrl);
   if (match) return { type: "image", source: { type: "base64", media_type: match[1], data: match[2] } };
   if (/^https?:\/\//i.test(imageUrl)) return { type: "image", source: { type: "url", url: imageUrl } };
   return undefined;
 }
 
-export function formatMessageForHistory(message: OcxMessage, vendorNameByWire?: ReadonlyMap<string, string>): string {
+/** Render replay prose; only Qoder opts into unsupported-reference history markers. */
+export function formatMessageForHistory(message: OcxMessage, vendorNameByWire?: ReadonlyMap<string, string>, markUnsupportedImages = false): string {
   if (message.role === "user") {
     const text = typeof message.content === "string"
       ? message.content
-      : message.content.map(p => (p.type === "text" || p.type === "document" ? p.text : `[${p.type}]`)).join("\n");
+      : message.content.map(p => {
+        if (p.type === "text" || p.type === "document") return p.text;
+        if (markUnsupportedImages && p.type === "image" && !imagePart(p.imageUrl)) return "[image omitted: unsupported reference]";
+        return `[${p.type}]`;
+      }).join("\n");
     return `USER:\n${text}`;
   }
   if (message.role === "assistant") {
@@ -758,7 +768,11 @@ export function formatMessageForHistory(message: OcxMessage, vendorNameByWire?: 
   if (message.role === "toolResult") {
     const text = typeof message.content === "string"
       ? message.content
-      : message.content.map(p => (p.type === "text" || p.type === "document" ? p.text : "[image]")).join("");
+      : message.content.map(p => {
+        if (p.type === "text" || p.type === "document") return p.text;
+        if (markUnsupportedImages && p.type === "image" && !imagePart(p.imageUrl)) return "[image omitted: unsupported reference]";
+        return "[image]";
+      }).join("");
     const status = message.isError ? " (error)" : "";
     return `TOOL RESULT (call_id: ${message.toolCallId})${status}:\n${text}`;
   }
@@ -774,7 +788,7 @@ export function formatMessageForHistory(message: OcxMessage, vendorNameByWire?: 
  */
 export function buildInputLines(
   message: OcxMessage,
-  options: { vendorNameByWire?: ReadonlyMap<string, string> } = {},
+  options: { vendorNameByWire?: ReadonlyMap<string, string>; markUnsupportedImages?: boolean } = {},
 ): string[] {
   if (message.role === "developer") return [];
 
@@ -788,6 +802,7 @@ export function buildInputLines(
         else if (part.type === "image") {
           const image = imagePart(part.imageUrl);
           if (image) content.push(image);
+          else if (options.markUnsupportedImages) content.push(textPart("[image omitted: unsupported reference]"));
         } else if (part.type === "document") {
           content.push(textPart(part.text));
         } else {
@@ -796,7 +811,7 @@ export function buildInputLines(
       }
     }
   } else {
-    const formatted = formatMessageForHistory(message, options.vendorNameByWire);
+    const formatted = formatMessageForHistory(message, options.vendorNameByWire, options.markUnsupportedImages);
     if (formatted) content.push(textPart(formatted));
   }
 
@@ -832,7 +847,7 @@ export function buildSystemPrompt(parsed: OcxParsedRequest): string | undefined 
  */
 export function buildConversationInput(
   parsed: OcxParsedRequest,
-  options: { maxHistoryChars?: number; vendorNameByWire?: ReadonlyMap<string, string> } = {},
+  options: { maxHistoryChars?: number; vendorNameByWire?: ReadonlyMap<string, string>; markUnsupportedImages?: boolean } = {},
 ): string[] {
   const nonDev = parsed.context.messages.filter(m => m.role !== "developer");
   if (nonDev.length === 0) {
@@ -840,7 +855,7 @@ export function buildConversationInput(
   }
 
   if (nonDev.length === 1 && nonDev[0]!.role === "user") {
-    return buildInputLines(nonDev[0]!, { vendorNameByWire: options.vendorNameByWire });
+    return buildInputLines(nonDev[0]!, options);
   }
 
   // Multi-turn conversation or history with tool results:
@@ -911,14 +926,14 @@ export function buildConversationInput(
     const status = currentMessage.isError ? " (error)" : "";
     currentRequestText = `TOOL RESULT (call_id: ${currentMessage.toolCallId})${status}:\n${text}\n\nPlease proceed based on the above tool result.`;
   } else {
-    currentRequestText = formatMessageForHistory(currentMessage, options.vendorNameByWire);
+    currentRequestText = formatMessageForHistory(currentMessage, options.vendorNameByWire, options.markUnsupportedImages);
   }
 
   const imageBlocks: WireContentPart[] = [...historyImageBlocks, ...currentImageBlocks];
 
   const maxHistoryChars = options.maxHistoryChars ?? MAX_PROJECTED_HISTORY_CHARS;
   let historyText = historyMessages
-    .map(msg => formatMessageForHistory(msg, options.vendorNameByWire))
+    .map(msg => formatMessageForHistory(msg, options.vendorNameByWire, options.markUnsupportedImages))
     .filter(Boolean)
     .join("\n\n");
   if (historyText.length > maxHistoryChars) {

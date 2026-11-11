@@ -18,7 +18,7 @@ opencodex를 설치하면 같은 실행 파일을 가리키는 `ocx`와 `opencod
 ## 설치
 
 ```bash
-npm install -g @bitkyc08/opencodex
+npm install -g --allow-scripts=bun @bitkyc08/opencodex
 ```
 
 :::note[npm이 bun postinstall을 차단했다면?]
@@ -26,8 +26,8 @@ npm install -g @bitkyc08/opencodex
 install-scripts ... blocked because they are not covered by allowScripts`).
 이 경우 번들 Bun 런타임이 준비되지 않을 수 있습니다. 런처는 허용된 번들 복구를
 시도한 다음, 절대 경로 PATH 디렉터리의 실행 가능한 Bun을 검증합니다. 정식 버전의
-major가 패키지 pin과 같고 minor가 pin 이상이면 사용할 수 있습니다. 현재 의존성
-1.4.2에서는 1.4.0 이상, 2.0.0 미만입니다. 제한 시간 안에 버전 정책과 identity를 확인하며,
+major가 패키지 pin과 같고 버전이 pin 이상이면 사용할 수 있습니다. 현재 의존성
+1.4.4에서는 1.4.4 이상, 2.0.0 미만입니다. 제한 시간 안에 버전 정책과 identity를 확인하며,
 `bun --version` 출력이 `bun -e`로 확인한 `Bun.version`과 같아야 합니다. POSIX에서는 런처가
 상위 디렉터리와 심볼릭 링크를 따라 도달하는 구성 요소를 포함한 후보 경로 전체를 검사합니다.
 검사하는 각 디렉터리와 심볼릭 링크, 최종 실행 파일은 root 또는 런처의 유효 사용자 소유여야 합니다.
@@ -86,7 +86,7 @@ GPT-5.6 Sol/Terra/Luna 카탈로그 정보가 이미 들어 있습니다. 다만
 아닙니다. 아직 정식 배포되지 않은 opencodex 빌드를 시험할 때만 preview 채널을 사용하세요:
 
 ```bash
-npm install -g @bitkyc08/opencodex@preview
+npm install -g --allow-scripts=bun @bitkyc08/opencodex@preview
 ocx update --tag preview
 ```
 

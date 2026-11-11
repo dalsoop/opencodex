@@ -1,13 +1,15 @@
-import { isNativeOpenAIChatTarget, stripBracketedModelSuffix } from "./wire";
+import { isMistralChatTarget, isNativeOpenAIChatTarget, stripBracketedModelSuffix } from "./wire";
 import { reasoningDetailSegmentForWire } from "./response-events";
 import { translatedChatDeveloperWireRole } from "./developer-role";
+import { singleLeadingSystemMessages } from "./single-system";
+import { limitMistralChatImages } from "./mistral-image-limit";
 import { isVolcengineArkPaygChatTarget } from "./tool-schema";
 import { contentPartsToText } from "../image";
 import { EMPTY_TOOL_OUTPUT_ANNOTATION, isWhitespaceOnlyTextPartArray } from "../empty-tool-output-annotation";
 import { identifyRoutedModel } from "../identity";
 import { buildNonOpenAIToolCatalogNudgeForTools, shouldInjectNonOpenAIToolCatalogNudge } from "../tool-catalog-nudge";
 import { peekReasoningForCall } from "../../responses/reasoning-replay-cache";
-import { chatReasoningReplayPolicy } from "./reasoning-replay";
+import { chatReasoningReplayPolicy, isReflectionThinkingModel } from "./reasoning-replay";
 import type { ClaudeThinkingProjection } from "../../lib/claude-request-projection";
 import { inlineDocumentDataUrl } from "../../responses/inline-document";
 import type { OcxAssistantMessage, OcxContentPart, OcxParsedRequest, OcxProviderConfig, OcxTextContent, OcxThinkingContent, OcxToolCall } from "../../types";
@@ -27,8 +29,8 @@ const VIDEO_UNSUPPORTED_MARKER = "[video omitted: the translated Chat route has 
 /**
  * Chat-completions image_url parts for images carried inside a tool result (issue #888). role:"tool"
  * content is text-only on every chat provider, so these ride in a follow-up user message instead of
- * being flattened to the "[image]" marker the model can't actually see. Data URLs and remote https
- * URLs are both valid in image_url.url, unlike Gemini inline_data which needs base64.
+ * being flattened to the "[image]" marker the model can't actually see. The same follow-up carries
+ * inline audio as input_audio, which is also user-content-only on this wire.
  */
 export function toolResultTextForWire(content: string | OcxContentPart[], annotateEmpty = false): string {
   // An empty content array is a present-but-empty result; `contentPartsToText` would
@@ -63,11 +65,19 @@ export function toolResultImageChatParts(content: string | OcxContentPart[]): un
   return parts;
 }
 
+/** Chat input_audio parts for audio carried inside a tool result. */
+export function toolResultAudioChatParts(content: string | OcxContentPart[]): unknown[] {
+  if (typeof content === "string") return [];
+  return content
+    .filter((p): p is Extract<OcxContentPart, { type: "audio" }> => p.type === "audio")
+    .map(p => ({ type: "input_audio", input_audio: { data: p.data, format: p.format } }));
+}
+
 /**
  * Whether this wire serializes a replayed thinking block for the given model.
  *
  * The single source of truth for that question on the Chat wire: the assistant branch below uses
- * it to decide `reasoning_content`, and the Messages ingress uses it to decide how much of a
+ * it to decide replayed reasoning fields/chunks, and the Messages ingress uses it to decide how much of a
  * prompt is worth counting. Two copies of this rule would drift, and the count would then
  * describe a body this adapter does not send.
  */
@@ -76,7 +86,8 @@ export function openAIChatSerializesThinking(
   modelId: string,
 ): ClaudeThinkingProjection {
   return {
-    text: chatReasoningReplayPolicy(provider, modelId).preserve,
+    text: (isMistralChatTarget(provider) && provider.preserveReasoningContentModels === undefined)
+      || chatReasoningReplayPolicy(provider, modelId).preserve,
     // The wire has no `signature` field — base64 replay tokens are Anthropic-wire-only.
     signature: false,
     // A `redacted_thinking` block is opaque provider data with no Chat representation: the
@@ -93,13 +104,21 @@ export function messagesToChatFormat(parsed: OcxParsedRequest, provider: OcxProv
   // One question, one answer for the whole conversion: does this wire carry replayed thinking
   // back for this model? Asked once so a long history cannot pay for it per message.
   const wireSerializesThinking = openAIChatSerializesThinking(provider, parsed.modelId).text;
+  const mistralThinking = isMistralChatTarget(provider);
 
   interface PendingToolCall { id: string; name: string }
   let pendingToolCalls: PendingToolCall[] = [];
   let deferredBarrierMessages: unknown[] = [];
   let pendingToolResultImageParts: unknown[] = [];
+  let pendingToolResultAudioParts: unknown[] = [];
   let mintedIdSeq = 0;
   const seenWireCallIds = new Set<string>();
+  // One call id can arrive with more than one result: Codex code mode records the yield marker
+  // for a running cell, then each late `notify()`/wait output as a further result for the same
+  // call. OpenAI-compatible chat providers reject the second `role:"tool"` reply for an id that
+  // was already answered ("Duplicate tool output for call_id"), so the repeats stay out of the
+  // wire body and their text is appended to the result that already answered the call.
+  const answeredToolResults = new Map<string, { content: unknown }>();
 
   const mintCallId = (): string => {
     let id = "";
@@ -128,6 +147,18 @@ export function messagesToChatFormat(parsed: OcxParsedRequest, provider: OcxProv
     pendingToolResultImageParts = [];
   };
 
+  const flushToolResultAudio = (): void => {
+    if (pendingToolResultAudioParts.length === 0) return;
+    out.push({
+      role: "user",
+      content: [
+        { type: "text", text: "[ocx] audio output from the preceding tool result(s):" },
+        ...pendingToolResultAudioParts,
+      ],
+    });
+    pendingToolResultAudioParts = [];
+  };
+
   const flushPendingToolCalls = (): void => {
     if (pendingToolCalls.length === 0) return;
     for (const call of pendingToolCalls) {
@@ -139,7 +170,22 @@ export function messagesToChatFormat(parsed: OcxParsedRequest, provider: OcxProv
     }
     pendingToolCalls = [];
     flushToolResultImages();
+    flushToolResultAudio();
     releaseDeferredBarriers();
+  };
+
+  /** Append a repeated result for an already-answered call to the answer that call already got. */
+  const appendAnsweredToolResultText = (
+    message: { content: unknown },
+    text: string,
+  ): void => {
+    if (text.length === 0) return;
+    const current = message.content;
+    // `toolResultTextForWire` always returns text for a `role:"tool"` reply, so the answer is a
+    // string; an unexpected shape still keeps both halves rather than dropping the repeat.
+    message.content = typeof current === "string" && current.length > 0
+      ? `${current}\n\n${text}`
+      : typeof current === "string" ? text : [current, text];
   };
 
   const nativeOpenAI = isNativeOpenAIChatTarget(provider);
@@ -148,7 +194,7 @@ export function messagesToChatFormat(parsed: OcxParsedRequest, provider: OcxProv
   // Gateways serve them under namespaced ids (LiteLLM's openai/Qwen3.8-27B, #6674), so any
   // number of leading path segments is accepted; the final segment names the checkpoint.
   // Orca's GGUF marker must precede any colon quant tag; other Orca variants are unchanged.
-  const leadingSystemTemplate = !nativeOpenAI && /^(?:[^/]+\/)*(?:flash-next|Qwen3\.8-Flash-Next|Qwen3\.8-27B|qwen3-8-27b(?:-(?:fp8|lora))?|OrcaSAQ-2-Cyber-27B(?=[^:/\s]*GGUF)[^:/\s]*(?::[\w-]+)?)$/i.test(parsed.modelId);
+  const leadingSystemTemplate = provider.singleLeadingSystemMessage !== true && !nativeOpenAI && /^(?:[^/]+\/)*(?:flash-next|Qwen3\.8-Flash-Next|Qwen3\.8-27B|qwen3-8-27b(?:-(?:fp8|lora))?|OrcaSAQ-2-Cyber-27B(?=[^:/\s]*GGUF)[^:/\s]*(?::[\w-]+)?)$/i.test(parsed.modelId);
   // Which role a developer message carries, and why the unrecorded state folds, is stated once
   // in ./developer-role.ts and read from there by the native passthrough as well. Either way the
   // message keeps the slot it arrived in — only the role changes, never the position.
@@ -185,9 +231,10 @@ export function messagesToChatFormat(parsed: OcxParsedRequest, provider: OcxProv
       case "developer": {
         const parts = typeof msg.content === "string" ? undefined : msg.content as OcxContentPart[];
         const hasImages = parts?.some(p => p.type === "image") ?? false;
+        const hasAudio = parts?.some(p => p.type === "audio") ?? false;
         // A document has a structured counterpart on this wire, so it needs the parts array for
         // the same reason an image does: flattening it to a string would drop the bytes.
-        const hasStructured = hasImages || (parts?.some(p => p.type === "document") ?? false);
+        const hasStructured = hasImages || hasAudio || (parts?.some(p => p.type === "document") ?? false);
         let chatMsg: Record<string, unknown>;
         if (msg.role === "developer" && !hasStructured) {
           const text = typeof msg.content === "string"
@@ -219,6 +266,9 @@ export function messagesToChatFormat(parsed: OcxParsedRequest, provider: OcxProv
             if (p.type === "image") {
               return { type: "image_url", image_url: { url: p.imageUrl, ...(p.detail ? { detail: p.detail } : {}) } };
             }
+            if (p.type === "audio") {
+              return { type: "input_audio", input_audio: { data: p.data, format: p.format } };
+            }
             // Chat Completions carries an attached document as a file part with inline bytes,
             // the direct counterpart of the Anthropic document block the caller sent.
             if (p.type === "document") {
@@ -240,9 +290,18 @@ export function messagesToChatFormat(parsed: OcxParsedRequest, provider: OcxProv
           // this wire. One carrying only a document has no such precedent, and demoting it would
           // undo the role this adapter just finished preserving.
           chatMsg = {
-            role: msg.role === "developer" && !hasImages ? developerWireRole : "user",
+            role: msg.role === "developer" && !hasImages && !hasAudio ? developerWireRole : "user",
             content: chatParts,
           };
+          if (provider.singleLeadingSystemMessage === true && chatMsg.role !== "user") {
+            // Keep document bytes in a user-compatible slot; only their accompanying text is
+            // instruction content. Use the same tool barrier so instruction order is retained.
+            const instruction = { role: developerWireRole, content: chatParts.filter(p => p.type === "text") };
+            if (instruction.content.length > 0) {
+              (pendingToolCalls.length > 0 ? deferredBarrierMessages : out).push(instruction);
+            }
+            chatMsg = { role: "user", content: chatParts.filter(p => p.type !== "text") };
+          }
         }
         if (pendingToolCalls.length > 0) deferredBarrierMessages.push(chatMsg);
         else out.push(chatMsg);
@@ -256,9 +315,15 @@ export function messagesToChatFormat(parsed: OcxParsedRequest, provider: OcxProv
         const chatMsg: Record<string, unknown> = { role: "assistant" };
         if (textParts.length > 0) chatMsg.content = textParts.map(p => p.text).join("");
         let reasoningContent = thinkingParts.map(p => p.thinking).join("");
+        // Reflection/Stealth replay a placeholder even on a tool-less turn, but never on an
+        // empty turn inside an unfinished tool batch: that turn is dropped below, and a
+        // fabricated reasoning block there would split the call from its real result.
+        const reflectionPlaceholder = isReflectionThinkingModel(parsed.modelId)
+          && chatReasoningReplayPolicy(provider, parsed.modelId).placeholder
+          && !(pendingToolCalls.length > 0 && !chatMsg.content && toolCalls.length === 0 && thinkingParts.length === 0);
         if (
           reasoningContent.length === 0
-          && (toolCalls.length > 0 || thinkingParts.length > 0)
+          && (toolCalls.length > 0 || thinkingParts.length > 0 || reflectionPlaceholder)
           && wireSerializesThinking
         ) {
           const cached = toolCalls
@@ -268,7 +333,7 @@ export function messagesToChatFormat(parsed: OcxParsedRequest, provider: OcxProv
           // recorded under every call id — join unique texts only.
           if (cached.length > 0) {
             reasoningContent = [...new Set(cached)].join("\n");
-          } else if (chatReasoningReplayPolicy(provider, parsed.modelId).placeholder) {
+          } else if (!mistralThinking && chatReasoningReplayPolicy(provider, parsed.modelId).placeholder) {
             // Fallback (extends #950 and #1193; fixes #5421): the replay cache is
             // bounded (64 entries / 256 KiB / 1 h TTL) and always misses on
             // long sessions, and some thinking/tool rounds carry no recorded
@@ -283,16 +348,17 @@ export function messagesToChatFormat(parsed: OcxParsedRequest, provider: OcxProv
           }
         }
         if (reasoningContent.length > 0 && wireSerializesThinking) {
-          // MiniMax's interleaved-thinking contract requires the structured
-          // reasoning_details array back on the next turn; a reasoning_content
-          // string is the native-format pass-back the docs mark unsupported.
-          if (modelInList(provider.reasoningDetailsModels, parsed.modelId)) {
+          if (mistralThinking) {
+            chatMsg.content = mistralThinkingContent(reasoningContent, chatMsg.content as string | undefined);
+          } else if (modelInList(provider.reasoningDetailsModels, parsed.modelId)) {
+            // MiniMax requires structured details rather than reasoning_content.
             chatMsg.reasoning_details = [reasoningDetailSegmentForWire(reasoningContent)];
           } else {
             chatMsg.reasoning_content = reasoningContent;
           }
         }
-        const hasReplayedReasoning = chatMsg.reasoning_content !== undefined || chatMsg.reasoning_details !== undefined;
+        const hasReplayedReasoning = chatMsg.reasoning_content !== undefined || chatMsg.reasoning_details !== undefined
+          || (mistralThinking && Array.isArray(chatMsg.content));
         // A turn with no answer text, tools or reasoning carries nothing. Between a call and its
         // result it would also split the pair, so drop it there; a standalone empty answer keeps
         // its slot so templates that require strict user/assistant alternation still accept it.
@@ -311,10 +377,10 @@ export function messagesToChatFormat(parsed: OcxParsedRequest, provider: OcxProv
             type: "function",
             function: { name: namespacedToolName(tc.namespace, tc.name), arguments: JSON.stringify(tc.arguments) },
           }));
-          if (!chatMsg.content) chatMsg.content = emptyAssistantContent(provider);
+          if (!chatMsg.content) chatMsg.content = emptyAssistantContent(provider, parsed.modelId);
         }
         if (hasReplayedReasoning && chatMsg.content === undefined && chatMsg.tool_calls === undefined) {
-          chatMsg.content = emptyAssistantContent(provider);
+          chatMsg.content = emptyAssistantContent(provider, parsed.modelId);
         }
         out.push(chatMsg);
         pendingToolCalls = wireToolCalls.map(({ tc, id }) => ({ id, name: namespacedToolName(tc.namespace, tc.name) }));
@@ -324,16 +390,48 @@ export function messagesToChatFormat(parsed: OcxParsedRequest, provider: OcxProv
         let toolCallId = msg.toolCallId;
         const matchIdx = toolCallId ? pendingToolCalls.findIndex(c => c.id === toolCallId) : -1;
         if (matchIdx >= 0 && toolCallId) {
-          out.push({
+          const toolMsg = {
             role: "tool",
             tool_call_id: toolCallId,
             content: toolResultTextForWire(msg.content, provider.annotateEmptyToolOutputs === true),
-          });
+          };
+          out.push(toolMsg);
+          answeredToolResults.set(toolCallId, toolMsg);
           pendingToolResultImageParts.push(...toolResultImageChatParts(msg.content));
+          pendingToolResultAudioParts.push(...toolResultAudioChatParts(msg.content));
           pendingToolCalls.splice(matchIdx, 1);
           if (pendingToolCalls.length === 0) {
             flushToolResultImages();
+            flushToolResultAudio();
             releaseDeferredBarriers();
+          }
+        } else if (
+          toolCallId
+          && answeredToolResults.has(toolCallId)
+          && !pendingToolCalls.some(c => c.id === toolCallId)
+        ) {
+          const answer = answeredToolResults.get(toolCallId)!;
+          const text = toolResultTextForWire(msg.content, provider.annotateEmptyToolOutputs === true);
+          if (out[out.length - 1] === answer && deferredBarrierMessages.length === 0) {
+            // Adjacent results can share one reply without moving anything across a later turn.
+            appendAnsweredToolResultText(answer, text);
+            pendingToolResultImageParts.push(...toolResultImageChatParts(msg.content));
+            pendingToolResultAudioParts.push(...toolResultAudioChatParts(msg.content));
+            if (pendingToolCalls.length === 0) {
+              flushToolResultImages();
+              flushToolResultAudio();
+            }
+          } else {
+            // Chat cannot repeat a tool reply. Keep late text and media together at their
+            // recorded position, identified by call ID; an open tool block must close first.
+            const media = typeof msg.content === "string" ? [] : msg.content.flatMap(part => [
+              ...toolResultImageChatParts([part]), ...toolResultAudioChatParts([part]),
+            ]);
+            const carrier = { role: "user", content: [
+              { type: "text", text: `[ocx] additional output for tool call ${toolCallId}:\n${text}` },
+              ...media,
+            ] };
+            (pendingToolCalls.length > 0 ? deferredBarrierMessages : out).push(carrier);
           }
         } else {
           if (!toolCallId) toolCallId = `call_orphan_${out.length}`;
@@ -354,18 +452,19 @@ export function messagesToChatFormat(parsed: OcxParsedRequest, provider: OcxProv
           // falsy hit as a miss so the placeholder still fires.
           const orphanReasoning =
             cachedReasoning
-            || (wireSerializesThinking
+            || (!mistralThinking && wireSerializesThinking
               && chatReasoningReplayPolicy(provider, parsed.modelId).placeholder
               ? " "
               : undefined);
           const orphanReasoningFields: Record<string, unknown> = !orphanReasoning
             ? {}
+            : mistralThinking ? { content: mistralThinkingContent(orphanReasoning) }
             : modelInList(provider.reasoningDetailsModels, parsed.modelId)
               ? { reasoning_details: [reasoningDetailSegmentForWire(orphanReasoning)] }
               : { reasoning_content: orphanReasoning };
           out.push({
             role: "assistant",
-            content: emptyAssistantContent(provider),
+            content: emptyAssistantContent(provider, parsed.modelId),
             ...orphanReasoningFields,
             tool_calls: [{
               id: toolCallId,
@@ -374,13 +473,17 @@ export function messagesToChatFormat(parsed: OcxParsedRequest, provider: OcxProv
             }],
           });
           seenWireCallIds.add(toolCallId);
-          out.push({
+          const toolMsg = {
             role: "tool",
             tool_call_id: toolCallId,
             content: toolResultTextForWire(msg.content, provider.annotateEmptyToolOutputs === true),
-          });
+          };
+          out.push(toolMsg);
+          answeredToolResults.set(toolCallId, toolMsg);
           pendingToolResultImageParts.push(...toolResultImageChatParts(msg.content));
+          pendingToolResultAudioParts.push(...toolResultAudioChatParts(msg.content));
           flushToolResultImages();
+          flushToolResultAudio();
         }
         break;
       }
@@ -389,7 +492,7 @@ export function messagesToChatFormat(parsed: OcxParsedRequest, provider: OcxProv
 
   flushPendingToolCalls();
   releaseDeferredBarriers();
-  return out;
+  return limitMistralChatImages(singleLeadingSystemMessages(out, provider), provider, parsed.modelId) as unknown[];
 }
 
 export function safeToolName(name: string | undefined): string {
@@ -398,6 +501,17 @@ export function safeToolName(name: string | undefined): string {
   return sanitized;
 }
 
-export function emptyAssistantContent(provider: OcxProviderConfig): string | { type: "text"; text: string }[] {
-  return isVolcengineArkPaygChatTarget(provider) ? [{ type: "text", text: "" }] : "";
+export function emptyAssistantContent(provider: OcxProviderConfig, modelId = ""): string | { type: "text"; text: string }[] {
+  // Kimi K3.1 Pro rejects Ark's legacy empty-text array during tool continuations.
+  const upstreamModelId = provider.modelSuffixBracketStrip ? stripBracketedModelSuffix(modelId) : modelId;
+  const kimi31Pro = /^kimi-k3-1-pro(?:-\d{6})?$/.test(upstreamModelId);
+  return isVolcengineArkPaygChatTarget(provider) && !kimi31Pro ? [{ type: "text", text: "" }] : "";
+}
+
+/** Reconstruct completed text-only thinking; never invent signatures or placeholder reasoning. */
+function mistralThinkingContent(thinking: string, text?: string): unknown[] {
+  return [
+    { type: "thinking", thinking: [{ type: "text", text: thinking }] },
+    ...(text ? [{ type: "text", text }] : []),
+  ];
 }

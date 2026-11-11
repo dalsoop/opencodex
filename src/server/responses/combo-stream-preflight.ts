@@ -1,14 +1,30 @@
-import { codexAccountModelRefusal, codexAccountModelRefusalPayload, hasConflictingCodexModelRefusalEnvelopes, type CodexAccountModelRefusal } from "../../combos/failover";
+import {
+  codexAccountModelRefusal,
+  codexAccountModelRefusalPayload,
+  envelopeErrorRecord,
+  envelopeRecordCode,
+  hasConflictingCodexModelRefusalEnvelopes,
+  isMalformedResponseFormatRecord,
+  isOpenRouterOpaque400EnvelopeRoot,
+  isOpenRouterOpaque400Record,
+  type CodexAccountModelRefusal,
+} from "../../combos/failover";
 import type { ResponsesTerminalStatus } from "../../bridge";
 import { comboFailureDecision } from "../../combos";
 import { httpStatusFromTerminalError } from "../../lib/errors";
+import { hasResponseMediaType } from "../../lib/http-response-semantics";
 import type { RequestFailureStage } from "../../lib/request-failure-model";
 import type { RequestLogContext } from "../request-log";
 import { carryResponseToolOwnership } from "./response-tool-ownership";
 import { createSseInspector } from "../relay";
 import { MAX_CLIENT_SSE_FRAME_BYTES } from "../sse-frame-buffer";
+import { REQUIRED_TOOL_CONTRACT_CODE } from "../../lib/errors";
+import { isPausedTurn } from "../../lib/client-error-body";
+import { requiredToolReasoningPrelude } from "./combo-required-tool-stream";
 
 const COMBO_STREAM_PREFLIGHT_MAX_BYTES = MAX_CLIENT_SSE_FRAME_BYTES;
+// Required-tool reasoning may delay delivery, but never for an unbounded/trickling prelude.
+const COMBO_REQUIRED_TOOL_REASONING_HOLD_MS = 1_000;
 // Keep retained object count proportional to the same byte budget used by the
 // shared SSE framer. Tiny or empty upstream reads must not bypass the byte cap.
 const COMBO_STREAM_PREFLIGHT_MAX_CHUNKS = Math.max(
@@ -23,11 +39,25 @@ const PRE_OUTPUT_CONTROL_EVENTS = new Set([
   "response.heartbeat",
 ]);
 
+// The Codex WebSocket metadata channel (`codex-ws-metadata.ts`) writes these into the same SSE
+// body, typically ahead of `response.created`. They are rebuilt field by field from quota and
+// header metadata, so they are neither output nor a terminal. Committing on them made a native
+// target that declined before any output (#8107) final for the whole combo. Every other unknown
+// type still commits.
+const CODEX_METADATA_CONTROL_EVENTS = new Set([
+  "codex.rate_limits",
+  "codex.response.metadata",
+]);
+
 const TERMINAL_EVENTS = new Set([
   "response.completed",
   "response.failed",
   "response.incomplete",
 ]);
+
+// A failed terminal carrying one of these codes is a contract verdict, not a transient
+// upstream failure: another target would spend a request the adapter already refused.
+const NON_REPLAYABLE_FAILED_CODES = new Set(["required_tool_not_called"]);
 
 const RETRYABLE_ZERO_OUTPUT_INCOMPLETE_REASONS = new Set([
   "adapter_eof",
@@ -57,10 +87,26 @@ function bareErrorStatus(payload: unknown): number | undefined {
         ? Number(value)
         : undefined)
     .find(value => value !== undefined && value >= 400 && value <= 599);
-  const code = typeof error.code === "string"
-    ? error.code
-    : typeof event.code === "string" ? event.code : null;
+  const rawCode = error.code ?? event.code;
+  const code = typeof rawCode === "string"
+    ? rawCode
+    : typeof rawCode === "number" && Number.isFinite(rawCode)
+      ? String(rawCode)
+      : null;
   if (explicitStatus === undefined && code === "invalid_request_error") return 400;
+  // Status is the record's own evidence; whether that record speaks for the envelope is the
+  // decision's question, so a root hard stop still reports 400 instead of inventing a 5xx.
+  if (explicitStatus === undefined && isOpenRouterOpaque400Record(envelopeErrorRecord(event))) {
+    return 400;
+  }
+  // OpenRouter-style envelopes carry the HTTP status as a bare numeric `code` (e.g. `code: 400`)
+  // with no separate status field. `httpStatusFromTerminalError` only understands symbolic codes,
+  // so without this the opaque 400 stringifies to "400", reads as unknown, and falls back to 502 —
+  // which cools the target on the generic 5xx path instead of taking the intended no-cool hop.
+  if (explicitStatus === undefined
+    && typeof rawCode === "number" && Number.isInteger(rawCode) && rawCode >= 400 && rawCode <= 599) {
+    return rawCode;
+  }
   return explicitStatus ?? httpStatusFromTerminalError({
     type: typeof error.type === "string" && error.type !== "error" ? error.type : undefined,
     code,
@@ -96,40 +142,106 @@ function bareErrorIsRetryable(payload: unknown): boolean {
     return false;
   }
   const event = payload as Record<string, unknown>;
-  const nested = event.error;
-  const error = nested && typeof nested === "object" && !Array.isArray(nested)
-    ? nested as Record<string, unknown>
-    : event;
-  const code = typeof error.code === "string"
-    ? error.code
-    : typeof event.code === "string" ? event.code : null;
+  // The record selection, the opaque verdict and the code conflict rule are shared with the HTTP
+  // consumer; only the carrier (one parsed frame here, one body there) differs.
+  const record = envelopeErrorRecord(event);
+  const error = record ?? event;
+  const rootCode = envelopeRecordCode(event);
+  const recordCode = envelopeRecordCode(record);
   const message = typeof error.message === "string"
     ? error.message
     : typeof event.message === "string" ? event.message : "";
+  const rawRecord = {
+    ...(error as Record<string, unknown>),
+    ...(typeof event.detail === "string" ? { detail: event.detail } : {}),
+  };
+  const malformedResponseFormat = status === 400 ? isMalformedResponseFormatRecord(rawRecord, message) : undefined;
+  const openRouterOpaque400 = status === 400 ? isOpenRouterOpaque400EnvelopeRoot(event) : undefined;
+  // A conflicting root and record code hop only when each would hop on its own, so a root hard
+  // stop is never hidden behind a retryable record code (and a retryable pair keeps dev's hop).
   return comboFailureDecision(status, message, {
-    code, codexModelRefusal: terminalModelRefusal(status, event),
+    code: recordCode ?? rootCode, rootCode,
+    codexModelRefusal: terminalModelRefusal(status, event),
+    malformedResponseFormat, openRouterOpaque400,
   }) === "hop";
 }
 
-function retryableZeroOutputTerminal(payload: unknown): boolean {
+/**
+ * Only text and reasoning items, which the required-tool guard holds back until it decides. Both the
+ * snapshot's and the event's own `output` are read; an absent or empty one contributes nothing.
+ */
+function heldOnlyOutput(...outputs: unknown[]): boolean {
+  const items = outputs.flatMap(output => Array.isArray(output) ? output : []);
+  if (outputs.some(output => output !== undefined && !Array.isArray(output))) return false;
+  return items.length > 0 && items.every(item => item !== null && typeof item === "object"
+    && !Array.isArray(item) && ["message", "reasoning"].includes((item as { type?: unknown }).type as string));
+}
+
+function retryableZeroOutputTerminal(payload: unknown, context?: object): boolean {
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) return false;
   const event = payload as {
     type?: unknown;
-    response?: { incomplete_details?: { reason?: unknown }; output?: unknown };
+    status?: unknown;
+    end_turn?: unknown;
+    incomplete_details?: { reason?: unknown; retryable?: unknown };
+    output?: unknown;
+    error?: { code?: unknown; retryable?: unknown };
+    response?: {
+      status?: unknown;
+      end_turn?: unknown;
+      incomplete_details?: { reason?: unknown; retryable?: unknown };
+      output?: unknown;
+      error?: { code?: unknown; retryable?: unknown };
+    };
   };
   if (bareErrorIsRetryable(event)) return true;
-  if (event.type === "response.failed") return true;
-  if (event.type !== "response.incomplete") return false;
-  const reason = event.response?.incomplete_details?.reason;
-  // A terminal-only upstream can carry output without preceding delta/item events.
-  if (reason === undefined) return !Array.isArray(event.response?.output) || event.response.output.length === 0;
+  const target = (event.response && typeof event.response === "object" && !Array.isArray(event.response))
+    ? event.response as Record<string, unknown>
+    : event as Record<string, unknown>;
+  const emptyOutput = (!Array.isArray(event.output) || event.output.length === 0)
+    && (!Array.isArray(target.output) || target.output.length === 0);
+
+  if (event.type === "response.failed" || event.status === "failed") {
+    const error = (event.response as { error?: { code?: unknown; retryable?: unknown } } | undefined)?.error
+      ?? event.error;
+    const code = error?.code;
+    // The required-tool guard synthesizes this terminal over output it held back from the client,
+    // so held text and reasoning are not evidence of anything sent; it keeps the retryability it
+    // carries. Any other output item (a tool call, an action) still commits it.
+    if (code === REQUIRED_TOOL_CONTRACT_CODE) {
+      return error?.retryable !== false && (emptyOutput || heldOnlyOutput(target.output, event.output));
+    }
+    if (!emptyOutput) return false;
+    return !(typeof code === "string" && NON_REPLAYABLE_FAILED_CODES.has(code));
+  }
+  const isIncomplete = event.type === "response.incomplete" || event.status === "incomplete";
+  if (!isIncomplete) return false;
+  if (!emptyOutput) return false;
+  const details = (target.incomplete_details && typeof target.incomplete_details === "object" && !Array.isArray(target.incomplete_details))
+    ? target.incomplete_details as { reason?: unknown; retryable?: unknown }
+    : undefined;
+  const reason = details?.reason;
+  if (reason === undefined) return true;
+  if (reason === "max_output_tokens") {
+    // Same evidence the run-turn classifier requires before it treats an output limit as a
+    // replayable zero-output terminal: an explicitly unfinished turn or an explicitly
+    // non-retryable limit is an answer, not a target failure. A normalized Anthropic
+    // `pause_turn` also reads as max_output_tokens on the wire, so the request-scoped marker
+    // keeps a paused turn the client must continue from hopping to another provider.
+    if (isPausedTurn(context)) return false;
+    const endTurn = target.end_turn ?? event.end_turn;
+    if (endTurn === false) return false;
+    if (details?.retryable === false) return false;
+    return true;
+  }
   return typeof reason === "string" && RETRYABLE_ZERO_OUTPUT_INCOMPLETE_REASONS.has(reason);
 }
 
 /**
  * Decide when replaying the request on another combo target would risk duplicating
  * client-visible output or a tool-side effect. Unknown event types commit the child
- * conservatively; only the small Responses lifecycle preamble remains replayable.
+ * conservatively; only the small Responses lifecycle preamble and Codex metadata control frames
+ * remain replayable.
  */
 export function comboStreamPayloadCommitsOutput(payload: unknown): boolean {
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) return true;
@@ -145,7 +257,12 @@ export function comboStreamPayloadCommitsOutput(payload: unknown): boolean {
       if (Array.isArray(output) && output.length > 0) return true;
     }
   }
-  return !PRE_OUTPUT_CONTROL_EVENTS.has(type) && !TERMINAL_EVENTS.has(type);
+  if (type === "response.output_text.delta") {
+    const delta = (payload as { delta?: unknown }).delta;
+    if (delta === undefined || (typeof delta === "string" && delta.length === 0)) return false;
+  }
+  return !PRE_OUTPUT_CONTROL_EVENTS.has(type) && !CODEX_METADATA_CONTROL_EVENTS.has(type)
+    && !TERMINAL_EVENTS.has(type);
 }
 
 /**
@@ -181,6 +298,7 @@ function replayBufferedResponse(
   response: Response,
   reader: ReadableStreamDefaultReader<Uint8Array>,
   buffered: Uint8Array[],
+  pendingRead?: ReturnType<typeof reader.read>,
 ): Response {
   let index = 0;
   const body = new ReadableStream<Uint8Array>({
@@ -190,7 +308,8 @@ function replayBufferedResponse(
         return;
       }
       try {
-        const next = await reader.read();
+        const next = await (pendingRead ?? reader.read());
+        pendingRead = undefined;
         if (next.done) controller.close();
         else controller.enqueue(next.value);
       } catch (error) {
@@ -216,19 +335,40 @@ function failedTerminalResponse(
   const nested = terminalPayload.response;
   const terminalResponse = nested && typeof nested === "object" && !Array.isArray(nested)
     ? nested as Record<string, unknown>
-    : {};
-  const nestedError = terminalResponse.error;
+    : terminalPayload;
+  const nestedError = (nested as Record<string, unknown> | undefined)?.error;
   const topLevelError = terminalPayload.error;
   const error = nestedError && typeof nestedError === "object" && !Array.isArray(nestedError)
     ? nestedError as Record<string, unknown>
     : topLevelError && typeof topLevelError === "object" && !Array.isArray(topLevelError)
       ? topLevelError as Record<string, unknown>
+    : isOpenRouterOpaque400Record(terminalPayload)
+      ? {
+        message: terminalPayload.message,
+        code: terminalPayload.code,
+        metadata: terminalPayload.metadata,
+      }
     : {
-      type: "upstream_error",
-      code: "upstream_server_error",
+      // A caller-validated flat error can carry its identity beside type:error.
+      // Retain it when that caller established a 400, rather than discarding the
+      // rejection code before the single-shot opaque-state recovery sees it.
+      type: terminalPayload.type === "error" && logCtx.terminalHttpStatus === 400
+        ? "invalid_request_error" : "upstream_error",
+      code: terminalPayload.type === "error" && logCtx.terminalHttpStatus === 400
+        ? (typeof terminalPayload.code === "string"
+            ? terminalPayload.code
+            : typeof terminalPayload.code === "number" && Number.isFinite(terminalPayload.code)
+              ? String(terminalPayload.code)
+              : null)
+        : ((terminalPayload.type === "response.incomplete" || terminalPayload.status === "incomplete")
+          && (terminalResponse.incomplete_details as { reason?: unknown } | undefined)?.reason === "max_output_tokens"
+            ? "zero_output_token_limit" : "upstream_server_error"),
       message: typeof terminalPayload.message === "string"
         ? terminalPayload.message
-        : logCtx.upstreamError ?? "Provider stream failed before producing output",
+        : ((terminalPayload.type === "response.incomplete" || terminalPayload.status === "incomplete")
+          && (terminalResponse.incomplete_details as { reason?: unknown } | undefined)?.reason === "max_output_tokens"
+            ? "Provider reached its output token limit before producing output"
+            : logCtx.upstreamError ?? "Provider stream failed before producing output"),
     };
   const headers = new Headers(response.headers);
   headers.set("content-type", "application/json");
@@ -237,6 +377,7 @@ function failedTerminalResponse(
   const usage = terminalResponse.usage;
   return new Response(JSON.stringify({
     error,
+    ...(typeof terminalPayload.detail === "string" ? { detail: terminalPayload.detail } : {}),
     // The combo classifier needs only the error and optional usage. Do not carry
     // response ids, provider metadata, or future terminal fields into the client
     // error envelope merely because they shared the terminal snapshot.
@@ -272,23 +413,37 @@ export type ComboStreamPreflightResult =
 export async function preflightComboStreamResponse(
   response: Response,
   logCtx: RequestLogContext,
-  retryableTerminal: (payload: unknown) => boolean = retryableZeroOutputTerminal,
-  options?: { allowMissingContentType?: boolean; replayReadErrors?: boolean },
+  retryableTerminal?: (payload: unknown) => boolean,
+  options?: {
+    allowMissingContentType?: boolean;
+    replayReadErrors?: boolean;
+    requiredToolPrelude?: boolean;
+    signal?: AbortSignal;
+  },
 ): Promise<ComboStreamPreflightResult> {
-  const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
-  const isEventStream = contentType.includes("text/event-stream")
+  const retryableTerminalFor = retryableTerminal ?? ((payload: unknown) => retryableZeroOutputTerminal(payload, logCtx));
+  const contentType = response.headers.get("content-type");
+  const isEventStream = hasResponseMediaType(response.headers, "text/event-stream")
     || (!contentType && options?.allowMissingContentType === true);
-  if (!response.ok || !response.body || !isEventStream) {
+  if (!response.ok || !response.body) {
+    return { kind: "accepted", response };
+  }
+  if (!isEventStream) {
     return { kind: "accepted", response };
   }
 
   const reader = response.body.getReader();
+  const cancelRead = () => { reader.cancel(options?.signal?.reason).catch(() => undefined); };
+  if (options?.signal?.aborted) cancelRead();
+  else options?.signal?.addEventListener("abort", cancelRead, { once: true });
   const buffered: Uint8Array[] = [];
   let bufferedBytes = 0;
   let outputCommitted = false;
   let responseCreated = false;
   let terminalStatus: ResponsesTerminalStatus | undefined;
   let retryableTerminalPayload: Record<string, unknown> | undefined;
+  let holdTimer: ReturnType<typeof setTimeout> | undefined;
+  let holdDeadline: Promise<"hold-expired"> | undefined;
   const inspector = createSseInspector({
     logCtx,
     // A payload the inspector could not parse still reached this proxy, and it may be output.
@@ -298,12 +453,27 @@ export async function preflightComboStreamResponse(
       if (terminalStatus !== undefined || outputCommitted || retryableTerminalPayload) return;
       if (payload !== null && typeof payload === "object" && !Array.isArray(payload)
         && (payload as { type?: unknown }).type === "response.created") responseCreated = true;
-      const retryable = retryableTerminal(payload);
+      const retryable = retryableTerminalFor(payload);
       const matchedBareError = retryable && payload !== null && typeof payload === "object"
         && !Array.isArray(payload) && (payload as { type?: unknown }).type === "error";
       // A zero-output bare error is terminal evidence. Explicit client errors stay
       // committed; unknown and retryable upstream failures may advance the combo.
-      if (comboStreamPayloadCommitsOutput(payload) && !matchedBareError) outputCommitted = true;
+      const heldReasoning = options?.requiredToolPrelude && requiredToolReasoningPrelude(payload);
+      if (heldReasoning) holdDeadline ??= new Promise(resolve => {
+        holdTimer = setTimeout(() => resolve("hold-expired"), COMBO_REQUIRED_TOOL_REASONING_HOLD_MS);
+      });
+      if (comboStreamPayloadCommitsOutput(payload) && !matchedBareError && !heldReasoning) outputCommitted = true;
+      if (options?.requiredToolPrelude && payload && typeof payload === "object") {
+        const event = payload as { type?: unknown; response?: { output?: unknown; error?: { code?: unknown; retryable?: unknown } } };
+        const output = event.response?.output;
+        const contractFailure = event.type === "response.failed" && event.response?.error?.code === REQUIRED_TOOL_CONTRACT_CODE
+          && event.response.error.retryable !== false && Array.isArray(output) && output.every(item =>
+            item !== null && typeof item === "object" && !Array.isArray(item)
+            && ["message", "reasoning"].includes((item as { type: string }).type));
+        // Other lifecycle/terminal snapshots can hide effects too. Only our checked contract
+        // failure may discard a terminal-only text snapshot that was held in its entirety.
+        if (output !== undefined && (!Array.isArray(output) || output.length > 0) && !contractFailure) outputCommitted = true;
+      }
       if (!payload || typeof payload !== "object" || Array.isArray(payload)) return;
       if (retryable) retryableTerminalPayload = payload as Record<string, unknown>;
     },
@@ -312,9 +482,18 @@ export async function preflightComboStreamResponse(
 
   try {
     for (;;) {
+      options?.signal?.throwIfAborted();
       let next: Awaited<ReturnType<typeof reader.read>>;
       try {
-        next = await reader.read();
+        const pendingRead = reader.read();
+        const observed = await (holdDeadline ? Promise.race([pendingRead, holdDeadline]) : pendingRead);
+        options?.signal?.throwIfAborted();
+        if (observed === "hold-expired") {
+          // Expiry commits this child. Hand the in-flight read to the relay so its
+          // eventual chunk/error is delivered exactly once, never lost to the race.
+          return { kind: "accepted", response: replayBufferedResponse(response, reader, buffered, pendingRead) };
+        }
+        next = observed;
       } catch (error) {
         if (!options?.replayReadErrors) throw error;
         // The native relay still owns post-header transport failures. Preserve
@@ -360,6 +539,8 @@ export async function preflightComboStreamResponse(
       }
     }
   } finally {
+    if (holdTimer !== undefined) clearTimeout(holdTimer);
+    options?.signal?.removeEventListener("abort", cancelRead);
     inspector.dispose();
   }
 }

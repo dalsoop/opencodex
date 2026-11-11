@@ -18,12 +18,18 @@ identities/aliases/transactions and oversized state refuse rather than repair.
 ancestors, bounded no-follow single-link files and fatal UTF-8. Root-controlled
 OS directory aliases are allowed only with trusted resolved ancestors. An existing trusted
 configuration parent may be 0755; only the owned messaging subtree must be 0700, and enable
-does not chmod the existing parent.
+does not chmod the existing parent. On macOS, the private subtree and every state file must also
+have no extended access ACL; creation, reads, and atomic replacement all fail closed otherwise.
+Temporary-file ACL refusal or probe failure reports `unsafe_remote_storage`, closes the file descriptor
+and removes the unpublished file without replacing existing state.
 Mutations acquire an exclusive directory lock and atomically publish private
 files, syncing the file before rename and its parent directory before dependent work.
 Creation persists new directory entries; journal removal also syncs the parent before reporting success.
 A failed publication/removal directory sync reports `remote_storage_unknown`; the operation is not
-automatically retried and the visible state is retained for explicit recovery. Crash locks are not automatically reaped by age. Filesystem calls are not
+automatically retried and the visible state is retained for explicit recovery. A post-rename ACL
+refusal or probe failure also reports `remote_storage_unknown`, because replacement has already
+occurred; ACL privacy and crash durability require inspection before explicit recovery.
+Crash locks are not automatically reaped by age. Filesystem calls are not
 claimed to resist unrestricted same-uid access or privileged path replacement.
 
 `src/messaging/remote-enrollment.ts` uses a private temporary offered known-hosts
@@ -147,6 +153,20 @@ Transient old-endpoint unreachability can allow takeover; lease generation is no
 session authority. Initiated routes remain conflicts.
 `src/messaging/remote-ports.ts` refuses public reverse binds, including sshd
 GatewayPorts configurations. Port selection alone does not prove readiness.
+Local candidates use exclusive socket reservations until the synchronous SSH handoff;
+their process-local claims remain held until the owned pair closes. The remote `_port`
+helper cannot transfer a socket to sshd, so its exclusive candidate is released on return.
+SSH bind receipts precede loopback inspection: owned forwards request DEBUG1 diagnostics,
+but inspect only fixed success/failure tokens and retain no diagnostic bytes. The local
+pre-bind listening announcement is not a receipt; local session entry and the exact remote
+forward success are. Only explicit unsuccessful forward binds reselect both candidates,
+at most three attempts within the original setup deadline, after joined pair cleanup.
+Repeated lost candidates are excluded. Authentication, inspection and cleanup failures
+are not retried. Helpers preserve intrinsic I/O and pre-cleanup exit failures through
+diagnostic settlement; pair classification after joined cleanup ignores sibling exits
+caused by shutdown, so an initiating bind failure survives a sibling readiness rejection.
+Independent failures, cancellation and incomplete cleanup remain terminal.
+Authenticated peer/native readiness remains required in the owner.
 Linux inspection requires the IPv4 listener table; only an absent IPv6 table is treated as
 empty. Permission, read and other inspection failures remain fail-closed.
 
@@ -219,6 +239,9 @@ Offline contracts live in `tests/codex-integration/messaging-remote-contract.tes
 `tests/codex-integration/messaging-remote-lifecycle.test.ts`.
 Helper settlement and persistent/transient capacity contracts live in
 `tests/codex-integration/messaging-remote-process.test.ts`.
+Exclusive reservations, SSH receipts and bounded lost-port recovery are exercised by
+`tests/codex-integration/messaging-remote-forward-failure.test.ts` and
+`tests/codex-integration/messaging-remote-port-reservation.test.ts` without a live SSH service.
 Opt-in `tests/codex-integration/messaging-remote-interop.test.ts` qualifies a
 disposable loopback sshd with generated keys, isolated homes and strict native
 fixtures. `tests/codex-integration/messaging-remote-native.test.ts` qualifies an
@@ -227,3 +250,9 @@ These are distinct receipts, not claims about production hosts or model complian
 Linux evidence does not attest macOS interoperability; Windows remote transport
 is unsupported. Mesh, dashboard, cached discovery, isolation, cross-harness
 messaging, managed skills, prompt policy and idle watches remain outside this slice.
+
+
+The optional local MCP reply-read surface belongs to
+[stored reply reads](local-messaging.md#explicit-stored-reply-reads). Its explicit
+CLI-home content-read permission does not widen remote-peer admission, expose a
+remote read endpoint or change this foreground ownership/return-route contract.

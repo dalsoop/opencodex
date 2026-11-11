@@ -1,5 +1,5 @@
 # Model Catalog
-
+WorkBuddy AI discovery and account-scoped cache follow the [WorkBuddy contract](providers/workbuddy.md).
 Activation-owned metadata discovery no longer refreshes known deadlines merely because quota snapshots age. See the [quota activation contract](providers/openai-tiers.md#public-provider-contract). Pool 2 discovery uses the [instance credential ownership contract](providers/anthropic-account-pool.md#discovery-credential-ownership). The retained writer uses an observed catalog's nonblocking runtime snapshot for effort diagnostics; it does not run a synchronous version probe. Unchanged clamp diagnostics follow the [effort-clamp observation contract](catalog-effort-clamp.md). Portable Rust-driven Bun contracts run in `.github/workflows/catalog-async-contracts.yml` on Linux, macOS and Windows.
 
 Native result continuations and function-result injection follow [the mode-specific result and control contract](transports/streaming-health.md#experimental-native-function-result-injection); this surface does not infer upstream support or alter its defaults.
@@ -22,9 +22,10 @@ Accounts added through the [Orca import](codex-home.md#orca-source-owned-account
 validation-pending. Import alone supplies no entitlement evidence for the model catalog.
 
 ## Shared catalog
+`src/server/models-capabilities.ts` preserves the legacy `/v1/models` negative reasoning signal for an explicit empty effort ladder when no reasoning, thinking-toggle or effort capability is declared. Explicit capability axes take precedence; a declared thinking toggle or reasoning support remains available with no effort rungs. This compatibility projection does not change Codex ladders, Claude thinking discovery, client exports or request wire policy.
 Vision-sidecar attachment metadata is projected after provider discovery/cache reads in `src/codex/catalog/routed-gather.ts`. The gather captures `visionSidecar.enabled !== false` before awaiting discovery, and `src/codex/catalog/gather-capture.ts` includes that effective flag in the flight key. Provider TTL/stale rows exclude synthetic sidecar image input; custom rows and synthesized combo members use the same captured switch. Explicit/native image modalities remain intact, and enabled advertisement retains the existing config-based consumer predicate without probing credential availability. An effective Vision switch change through `src/server/management/config-routes.ts` invokes the catalog-only management funnel after persistence to publish both catalog and cache; incomplete work is exposed as `catalogRefreshPending` without claiming client reload. Coverage: `tests/codex-integration/catalog-vision-sidecar-disabled.test.ts` and `tests/vision/sidecar-settings-vision-catalog.test.ts`.
-Custom-provider missing windows use [source-labelled vendor estimates](catalog-vendor-context.md) only when the provider opts in with `inferContextWindow: true`; these remain distinct from asserted routing capacity.
-Static policy and observed catalog evidence are separate authorities. Antigravity grouping and selection projection follow the [discovered effort-family contract](providers-and-adapters.md#antigravity-effort-families).
+Custom-provider missing windows use [source-labelled vendor estimates](catalog-vendor-context.md) only when the provider opts in with `inferContextWindow: true`; these remain distinct from asserted routing capacity. Registry context seed capture preserves [configured window precedence](catalog-vendor-context.md): provider-wide limits bound seed defaults, explicit per-model windows win, and smaller observed limits remain authoritative.
+Static policy and observed catalog evidence are separate authorities. Antigravity grouping and selection projection follow the [discovered effort-family contract](providers-and-adapters.md#antigravity-effort-families). Refreshing Antigravity discovery unions enabled models from usable accounts through `src/codex/catalog/antigravity-discovery.ts`; credential resolution, final-send, and publication checks retain each sibling's config-root, provider cache-generation, and full credential snapshot authority. That authority also requires the active account to remain usable with the credential discovery sent, so a needsReauth, pause, expiry or replacement of the active account stops later sibling refreshes and sends (`tests/adapters/google/antigravity-routing-carry.test.ts`). A sibling waiting for its OAuth refresh lock rechecks root/cache authority before token dispatch; an already-dispatched rotation still persists under the credential CAS. Because discovery resolves siblings with `requireUsableAccount`, the generic and xAI refresh paths in `src/oauth/index.ts` also recheck `needsReauth` under that lock, and the resolver rechecks it before adopting a refresh result, so a sibling marked for reauthentication while it waited sends neither its refresh token nor a bearer. Callers that do not require a usable account (explicit refresh, login, the token guardian) keep refreshing such an account; one that joined a usable-only refresh retries as its own owner. Each account publishes its own roster; active and sibling discovery capture observation order before sending, so delayed publication cannot erase a later inference denial. Active publication also rechecks the captured credential generation. An observed-only gather does not probe siblings.
 `src/providers/resolved-model-policy.ts` resolves and freezes only registry/operator static facts,
 hard wire pins, aliases, and explicit false/empty declarations. Discovery responses, generated
 metadata, cache freshness, availability, credentials, account state, quota and health never enter
@@ -39,7 +40,7 @@ registry read can change a running gather flight. Anthropic OAuth discovery in `
 Policy is keyed by the final upstream wire model. Public alias and virtual-model identities remain
 diagnostic/catalog provenance and must be resolved before policy capture. Exact nonempty explicit
 input-modality declarations outrank the registry/config modality map; an empty declaration
-falls through to that map.
+falls through to that map. `src/routing/capability.ts` also reads exact `modelCapabilities` modalities before legacy vision hints and provider-wide defaults, matching runtime image eligibility.
 Anthropic numeric point releases inherit the nearest configured family context window before the
 provider-wide fallback. Exact model output limits precede the provider default output limit. For Azure OpenAI destinations (`*.openai.azure.com`), `src/providers/azure-model-metadata.ts` refreshes public models.dev Azure metadata during discovery under a two-second/16 MiB budget, coalesces callers per resolved config directory, caches for 24 hours, and keeps stale data offline. Snapshot, in-flight refresh and retry cooldown state are isolated by that directory; discovery admission captures that directory and threads it through refresh and all later hint lookups, including cached rows, configured retention, custom rows and combo members. Azure provider-result TTL and stale caches store only upstream rows; fresh, stale and cooldown reads apply root-specific metadata and configured retention after retrieval. Public metadata fetches reject redirects. `src/providers/derive.ts` merges published Azure fields over bundled Azure/vendor hints by exact or case-insensitive model id. Shared catalog hints fill missing input modalities and context/output limits, while explicit declarations, reported modalities/limits, sidecar coverage and configured caps retain precedence. Azure inference flags alone do not imply vision. Generation never fetches this snapshot, static policy remains unchanged, and arbitrary deployment aliases receive no guessed metadata.
 
@@ -52,7 +53,7 @@ provider-wide fallback. Exact model output limits precede the provider default o
   (`src/codex/catalog/pinned-models.ts`): the codex-rs snapshot first, then rows from
   `src/codex/data/roster-pinned-models.json` whose slug the snapshot lacks. The roster file holds
   verbatim rows the codex-rs snapshot lacks (`gpt-6-sol`/`gpt-6-luna` from the 2026-09-23 roster,
-  `gpt-6.1-sol` from openai/codex `models.json` after #49318), so a wholesale snapshot re-pin
+  `gpt-6.1-sol` from openai/codex `models.json` after #49318 and `gpt-6.1-terra` from that file on 2026-10-27), so a wholesale snapshot re-pin
   never erases them and a snapshot row for the same slug always wins;
 - excludes retired `gpt-5.3-codex-spark` from native fallback, observed/cache rows, and
   account-selector projections, including retained sync and native restore;
@@ -65,10 +66,10 @@ provider-wide fallback. Exact model output limits precede the provider default o
   compatibility is `null`: Codex's hash-change trigger requires two non-null, unequal hashes, so
   native/routed switches do not compact merely because of a synthetic marker. Native rows and
   Codex-forward aliases keep upstream hashes; foreign rows keep valid hashes. Token limits are unchanged;
-- forces strict Codex catalog fields required by the current parser;
-- hides `disabledModels` without blocking direct routing (routed provider ids are excluded;
-  account-qualified native ids hide only that selector row; BARE native slugs hide the bare row
-  and all account-selector clones and drop that model family from raw `/v1/models`);
+- forces strict Codex catalog fields required by the current parser. `src/codex/catalog/parsing.ts` preserves model arrays verbatim, including id-only rows used for prompt text and reasoning-summary support, and treats non-array model collections as unavailable. Native provenance in `src/codex/catalog/native-priority.ts`, live native-slug discovery and template selection validate rows locally; baseline priorities must be finite numbers and retained source ranks must be valid. Live discovery tolerates malformed optional provenance without repairing its files. Bundled-catalog validity still rejects non-object rows; retained sync keeps its existing null-row rejection in native recovery before provenance is read;
+- hides `disabledModels` without blocking direct routing by default (routed ids are excluded; account-qualified native ids hide only that row; bare native ids hide the bare row and all account clones and drop the family from raw `/v1/models`). Explicit `omitDisabledNativeModels: true` omits disabled native rows in convergence, retained sync, cache and Codex-shaped HTTP discovery through the existing native-alias suppression set and `src/codex/catalog/native-omission.ts`;
+  `src/codex/catalog/native-template.ts` captures the supported native source before omission in root field `opencodex_native_inheritance_template`, independently of emitted rows. Upgradeable evidence passes through the writer's native upgrade, normalization and runtime effort clamp before that row is omitted; the retained replacement matches the flag-off native result. Non-upgraded evidence stays pristine for byte-idempotent builds. Repeated builds validate retained evidence with the same supported-slug, instructions and non-routed provenance rules; absent or invalid evidence preserves existing null-template behavior. `src/codex/catalog/bundled.ts` applies strict native normalization to retained templates on request-time reads, matching emitted native sources including JSON property order. Omission removes orphan control-plane reviewer rows when no ordinary native remains. Routed bytes remain equal with the flag on or off;
+  omission defaults off, existing native-alias omission remains independent, and direct routing, pristine recovery and no-op sync mtime behavior are unchanged. Coverage: `tests/codex-integration/catalog-omit-disabled-native.test.ts`;
 - applies exact provider/model compatibility exclusions after live discovery and metadata
   augmentation, so upstream-advertised but uncallable rows—including retired aliases retained in
   generated metadata for historical accounting—never enter dashboard or Codex pickers;
@@ -95,9 +96,9 @@ Cache invalidation reports an unchanged derived cache separately from a failed r
 
 Custom rows replace discovered rows that encode to the same Codex-facing slug. For a provider whose captured discovery declares an order (`preferFirst`), `src/codex/catalog/routed-gather.ts` puts the replacement in the discovered row's slot; every other provider keeps discovered rows first and custom rows after them, as before. Coverage: `tests/codex-integration/catalog-custom-ordering.test.ts`.
 
-On the default `opencodex-catalog.json` path, sync deliberately uses two catalog sources: Codex's bundled catalog supplies a current native entry template, while the actual on-disk catalog supplies the rows being merged. `src/codex/catalog/bundled.ts` treats unsupported bundled-model commands, spawn failures and structurally invalid model rows (null, arrays or other non-objects) as unavailable in both synchronous and asynchronous loading, preserving the existing catalog fallback. This split is
+On the default `opencodex-catalog.json` path, sync deliberately uses two catalog sources: Codex's bundled catalog supplies a current native entry template, while the actual on-disk catalog supplies the rows being merged. `src/codex/catalog/bundled.ts` treats unsupported bundled-model commands, spawn failures and structurally invalid model rows (null, arrays or other non-objects) as unavailable in both synchronous and asynchronous loading, preserving the existing catalog fallback. On macOS, when discovery ends on the bare `codex` sentinel because it found no CLI, the same loader also probes the known ChatGPT.app locations from `src/codex/mac-app-bundle.ts` before reporting unavailable (#8360), so `ocx connect status` readiness can report the bundled CLI's ladder when the bundle identity gate could not classify it; the candidate list grants no trust, and an unverifiable bundle still yields null because every execution passes the exec-boundary checks. This split is
 required because empty or partial provider discovery must preserve routed entries and genuine user-native rows from the file that will be overwritten; a bundled catalog never contains those rows. Retained sync and evidence-bound convergence
-share an explicit observed-state merge policy and restore native priorities from the once-only pristine backup rather than from a catalog whose priorities may already have been rewritten. A configured custom catalog remains the native
+share an explicit observed-state merge policy and resolve unbanded priorities through the [native source-priority contract](subagents.md#native-source-priority), including live/published/cache parity. A configured custom catalog remains the native
 metadata/template authority even when a bundled-catalog memo is warm. Both paths may use an admitted matching bundled memo only as installed-runtime capability evidence to remove unsupported reasoning efforts; convergence never probes Codex
 itself. The default-on scheduler in `src/codex/catalog-auto-refresh.ts` settles bundled runtime and authenticated Codex roster observations before admission, using dynamic imports, a 15-second source wait and asynchronous selected-runtime/model probes. Request metadata and templates use the same-selection last confirmed bundled memo, refresh its runtime observation every 15 seconds without awaiting it, and fall back to existing catalog/cache sources while a cold or changed selection settles. The bundled evidence keeps its 60-second freshness bound for convergence; failed request-triggered refreshes retain confirmed rows with a 60-second retry cooldown. Shared flights have a 45-second aggregate deadline, cancel obsolete selections and reject late catalog or runtime persistence after observed input/epoch changes. Explicit CLI synchronous loading and compatibility checks remain synchronous. Retained sync settles the async source before reading the content and evidence it later revalidates. Source failure uses existing evidence, while a stopped generation cannot start the next source or converge. A changed set records `reloadRequired` through `src/codex/catalog-refresh-status.ts` for observed running app-servers and logs one content-free restart hint; a no-op keeps it while processes remain stale or the restart observation is unknown and clears it when they are fresh or gone. Automatic refresh never restarts processes. A changed set also runs the client fan-out the server lifecycle registers through `setCatalogAutoRefreshClientFanout`; it refreshes only already-connected clients ([integrations](clients/integrations.md#owned-catalog-convergence)), binds each delivery to the newest unrevoked server owner and stops with the generation or that owner's revocation or release, refuses configuration drift except Desktop applied-marker updates, and logs only a failure count; `tests/codex-integration/catalog-auto-refresh-client-fanout.test.ts` covers it. `tests/codex-integration/catalog-auto-refresh-scheduler.test.ts` covers these boundaries. `src/codex/catalog/bundled.ts` and `src/codex/runtime.ts` prefer the recorded native `launcherPath` from validated schema-2 PATH-overlay state within their shim candidates, retaining legacy candidates and other priorities. `src/codex/features.ts` follows that backing only when the selected wrapper matches validated state; it never probes unrelated installations. Overlay state and activation follow [the runtime lifecycle contract](runtime.md#lifecycle).
 
@@ -214,7 +215,7 @@ data recorded under the previous pair.
 Entitlement-specific rosters (Qoder, Devin, Cursor, CodeBuddy) additionally bind their cache entry to an
 irreversible credential fingerprint: a credential switch observes neither the fresh nor the stale
 roster recorded under the previous credential, and a failed discovery's cooldown neither supplies
-the previous credential's stale roster nor suppresses the next credential's first discovery.
+the previous credential's stale roster nor suppresses the next credential's first discovery. Qoder discovery runs once per credential and cache generation with a 30 s CLI bound, shared by the gather and the dashboard connection test, so a cache invalidation revokes a run in flight or just finished; the test stops waiting after 8 s and reports the provider as still discovering, and a late success still in the current generation drops in-flight aggregate gathers (one started before it may hold the old roster) and re-syncs the catalog through management convergence, retrying a busy or stale disposition; until a gather stores that run, it outranks a fresh cached roster and the failure cooldown, and the cached roster stays as the fallback if it is never stored (#8115).
 Selector decoding uses the same authority boundary through `getRoutingCached`: it resolves a
 credential only for a scoped entry, reads OAuth through the passive store observer, and rejects
 unavailable or changed authority. Successful API-key selection commits clear the cache and revoke
@@ -307,7 +308,7 @@ restores the owned name before normal native metadata upgrades. Divergent extern
 subject to those upgrades: Astra still replaces non-pinned names with its pinned native name.
 Template-derived rows discard the marker. The overlay leaves model IDs, metadata (including
 capabilities), ordering, routed combo aliases, custom rows and account-qualified rows unchanged;
-it does not relabel HTTP model listings or virtual `*-pro` rows.
+it does not relabel `/v1/models` or virtual `*-pro` rows. `src/server/management/model-rows.ts` also applies exact nonblank native overrides to bare rows with operator provenance. Client exports preserve these labels and their existing suffix rules. Absent or blank overrides keep previous fallbacks; account-qualified rows remain unchanged.
 
 ## Native passthrough
 
@@ -327,6 +328,8 @@ it: `nativeLadderIncludesUltra` answers from the self-described row (or an alias
 ships it. Both are ungated flagships. `gpt-6-astra-minor` is an account-gated capability alias of
 Astra with its own presentation (`GPT-6-Astra-Minor`); it has no pinned row of its own and stays
 hidden and request-refused until an authenticated roster lists it.
+
+GPT-6.1 Terra (2026-10-26) is self-described and ungated alongside GPT-5.6 Terra. Its verbatim pin names it `GPT-6.1 Terra`, with `low` default effort, low-through-ultra, multi-agent `v2`, 500,000 default context / 450,000 compaction and an 872,000 native ceiling/input limit (`NATIVE_GPT61_TERRA_CONTEXT`); explicit long-window opt-in compacts at 784,800. It offers Fast only, including with `ultraFastTier` enabled; default models and subagent rosters stay unchanged.
 
 The API registry separately owns Astra's 1,050,000 context / 922,000 input / 128,000 output and
 five API effort levels. Trusted discovery snapshots carry the output ceiling as well as input
@@ -479,11 +482,13 @@ The shared Responses path follows the [bounded multipart recovery contract](suba
 
 ## Ultra reasoning level
 
-Ultra is always advertised in the catalog regardless of the `multi_agent_v2` toggle. The v2 toggle
-controls only the multi-agent collab surface, not ultra visibility. The `nativeEffortClamp` function
-wire-clamps ultra/max to each model's real top rung (e.g. gpt-5.5 ultra → xhigh on the wire).
+Catalog rows retain independent reasoning facts from [per-model declarations](config.md#explicit-per-model-capability-declarations) and discovered optional snake-case capability flags. `src/codex/catalog/model-hints.ts` reapplies config over original discovered reasoning metadata rather than a previous projection; removing an override restores that source at the catalog clone sites that explicitly propagate it. Absent axes remain unknown and explicit false survives publication.
 
-For routed models, `modelSuppressSyntheticMax` is a catalog-only per-model setting. A true value
+`src/codex/catalog/effort.ts` uses the [client export projection](clients/integrations.md#model-output-limits) at Codex's effort-enum boundary: toggle-only models receive `none/high` off/on choices and a declared thinking default, without recording those choices as model strengths. Explicit toggle-axis declarations or negative reasoning/effort declarations constrain this projection and suppress synthetic top tiers. Positive strength support inferred from a legacy ladder alone retains its previous synthesis.
+
+Legacy catalog ladders advertise ultra regardless of the `multi_agent_v2` toggle, which controls only the multi-agent collab surface. `nativeEffortClamp` wire-clamps ultra/max to each model's real top rung (e.g. gpt-5.5 ultra → xhigh on the wire). `ultra` itself is never a native ChatGPT-backend wire value: that backend accepts `none` through `max`, so the clamp folds it to `max` even on rows whose pinned ladder lists it (`gpt-6-astra`, `gpt-6.1-sol`, `gpt-6.1-terra`). `src/server/responses/core-normalize.ts` also applies the clamp to the raw passthrough body, which the parser's options-only fold does not reach (#7590; `tests/responses/responses-native-ultra-effort-wire.test.ts`). The routed native Chat passthrough does the same for a caller's raw `ultra`: `nativeChatUltraWireEffort` in `src/adapters/openai-chat/reasoning-wire.ts` keeps `ultra` only when the model's declared ladder lists it. Otherwise it resolves `max` through `mapReasoningEffort` like the translated path: an operator alias for `max` wins before the ladder clamp (so a `max` → `ultra` alias still sends `ultra`, and `__omit__` drops the field), then the clamp picks the highest declared rung at or below `max`. On a thinking-toggle wire it skips the alias map and clamps `max` to the ladder directly, because that map holds thinking discriminators that `applyExplicitChatReasoningWirePolicy` resolves (#8254; `tests/providers/mistral-reasoning-efforts.test.ts`). For canonical OpenAI forwarding, other unsupported efforts map to the nearest published rung at or below the request, or the lowest rung when below the model minimum (`gpt-6.1-sol` and `gpt-6.1-terra` `none` → `low`), after final model selection, including combo failover.
+
+For routed models retaining legacy ladder synthesis, `modelSuppressSyntheticMax` is a catalog-only per-model setting. A true value
 prevents `src/codex/catalog/effort.ts` from adding a missing synthetic `max` and prevents
 `src/codex/catalog/build-entries.ts` from repairing that missing rung during observed-state merge.
 It never removes a provider-declared `max`, and `ultra` remains advertised. If the configured default
@@ -494,14 +499,9 @@ can remove the former. Codex uses this same membership for the picker and explic
 effort validation; an explicit `max` spawn can therefore fail client-side before proxy wire clamping,
 while retained `ultra` remains the supported harness path.
 
-`effortCap` and `subagentEffortCap` are hard ceilings applied on the V2 path
-(`src/server/effort-policy.ts`): they lower or preserve the requested effort rather than rejecting
-the request, and they never raise it.
+`effortCap` and `subagentEffortCap` are hard ceilings applied on the V2 path (`src/server/effort-policy.ts`): they lower or preserve the requested effort rather than rejecting the request, and they never raise it.
 
-Combo dispatch reads the final target ladder through the same `supportedLadderFor` authority. An
-explicit empty ladder means that target receives no effort control; an unknown ladder receives no
-parent effort controls only when the combo opts into `reasoningEffortMode: "adaptive"`. Known
-non-empty ladders continue through the existing per-target resolution.
+Combo dispatch reads the final target ladder through the same `supportedLadderFor` authority. An explicit empty ladder means that target receives no effort control; an unknown ladder receives no parent effort controls only when the combo opts into `reasoningEffortMode: "adaptive"`. Known non-empty ladders continue through the existing per-target resolution. Independent `reasoning.enabled` survives this strength-only stripping.
 
 The `ocx effort` CLI accepts only the same canonical cap ladder before live probing or persistence.
 Its status output preserves unsupported legacy cap values and reports that those fields are ignored;
@@ -512,12 +512,11 @@ Operator-owned `pinnedReasoningEffort`, `modelPinnedReasoningEfforts`, and root
 `modelPinnedEfforts` resolve before applicable effort caps at the final destination.
 Provider model pins precede provider-wide pins, then global selector/destination pins.
 A pin can raise the effective caller effort; the later cap can still lower or omit it.
-`none` means explicit-effort omission (provider default), not guaranteed reasoning disablement.
-Compaction maintenance is exempt. Pins are user overlays and do not alter registry seeds,
-model discovery or advertised ladders. Native Chat applies qualifying caps even without a
-pin, and normalizes pinned values and values rewritten by a cap through provider wire
-mapping. Without a pin or a cap rewrite, native caller values retain their original wire
-spelling; the V1 and compaction cap exemptions are preserved.
+On legacy effort paths, `none` means explicit-effort omission (provider default), not guaranteed reasoning disablement. For a declared thinking toggle, the client compatibility decoder resolves `none` to thinking off before strength policy; an independent `thinkingEnabled` boolean takes precedence. Effort caps do not clear that switch, and a destination change restores the original thinking choice alongside effort before normalization.
+Compaction maintenance is exempt. Pins are user overlays and do not alter registry seeds, model discovery or advertised ladders.
+Native Chat applies qualifying caps even without a pin, and normalizes pinned values and values rewritten by a cap through provider wire
+mapping. Without a pin or a cap rewrite, native caller values retain their original wire spelling, except a caller `ultra`,
+which the passthrough folds as described under the `nativeChatUltraWireEffort` contract above; the V1 and compaction cap exemptions are preserved.
 
 > Decision record: [ADR-0023](decisions/ADR-0023-ultra-reasoning-level.md)
 
@@ -577,7 +576,7 @@ Exact [model input declarations](config.md#explicit-per-model-capability-declara
 
 ## Renamed destination reasoning metadata
 
-`src/providers/derive.ts` fills missing reasoning tables for renamed providers accepted by the existing fixed-key destination matcher. Model entries are cloned and explicit user entries (including empty arrays) win, matched case-insensitively. Provider-wide effort defaults fill only when undefined; Command Code unknown models therefore keep the registry's empty picker policy unless overridden. Identity, transport and other capability axes are unchanged. The gathered row drives client exports; this metadata contract does not prove arbitrary gateway routing.
+`src/providers/derive.ts` fills missing reasoning tables for renamed providers accepted by the existing fixed-key destination matcher. Model entries are cloned and explicit user entries (including empty arrays) win, matched case-insensitively. Provider-wide effort defaults fill only when undefined; Command Code unknown models therefore keep the registry's empty picker policy unless overridden. Independent reasoning booleans merge per exact model and axis under the [capability declaration contract](config.md#explicit-per-model-capability-declarations). Identity, transport and unrelated capability axes are unchanged. The gathered row drives client exports; this metadata contract does not prove arbitrary gateway routing.
 
 Shared response-log retention and native SSE inspection pacing follow the [bounded inspection contract](transports/byte-accounting.md#response-log-inspection); other subsystem behavior remains unchanged.
 

@@ -1,20 +1,21 @@
 <p align="center">
-  <img src="../assets/banner.png" alt="opencodex — Codex、Claude Code、Claude Desktop、Grok Build のための汎用プロバイダープロキシ" width="100%">
+  <img src="../assets/banner.png" alt="opencodex — Codex、Claude Code、Claude Desktop、Grok Build などのための一つのローカルゲートウェイ" width="100%">
 </p>
 
-<h3 align="center">make codex open!</h3>
-<p align="center"><b>OpenAI Codex、Claude Code、Claude Desktop、Grok Build のための汎用プロバイダープロキシ</b><br>
-コマンド 2 つで、そのすべてが好きな LLM で動きます。</p>
+<h3 align="center">AI コーディングツールとモデルをつなぐ、一つのローカルゲートウェイ。</h3>
+<p align="center"><b>Codex、Claude Code、Claude Desktop、Grok Build で好きなモデルを使い、<br>管理対象の設定で OpenCode、Pi、Qoder、WorkBuddy、Kilo、Cline、T3 Code などを接続できます。</b><br>
+<a href="https://opencodex.me/ja/reference/client-support/">対応ツールをすべて見る →</a></p>
+<p align="center">GOAT の一部：任意のモデル、任意のマシンでコーディングエージェントを動かす → <a href="https://trygoat.ai">trygoat.ai</a></p>
 
 <p align="center">
   <a href="https://x.com/claudeebum"><img src="https://img.shields.io/badge/%40claudeebum-000000?logo=x&logoColor=white" alt="X で @claudeebum をフォロー"></a>
   <a href="https://www.npmjs.com/package/@bitkyc08/opencodex"><img src="https://img.shields.io/npm/v/@bitkyc08/opencodex?color=cb3837&label=npm&logo=npm" alt="npm version"></a>
-  <a href="https://github.com/lidge-jun/opencodex/blob/main/LICENSE"><img src="https://img.shields.io/npm/l/@bitkyc08/opencodex?color=blue" alt="license"></a>
+  <a href="https://github.com/lidge-jun/opencodex/blob/dev/LICENSE"><img src="https://img.shields.io/npm/l/@bitkyc08/opencodex?color=blue" alt="license"></a>
   <img src="https://img.shields.io/node/v/@bitkyc08/opencodex?logo=node.js&label=node" alt="node version">
 </p>
 
 ```bash
-npm install -g @bitkyc08/opencodex
+npm install -g --allow-scripts=bun @bitkyc08/opencodex
 ocx start
 ```
 
@@ -80,19 +81,14 @@ Sol がセッションを進め、Kimi K3 のサブエージェントを呼び�
   <a href="../README.md">English</a> · <a href="README.fr.md">Français</a> · <a href="README.ko.md">한국어</a> · <a href="README.zh-CN.md">简体中文</a> · <a href="README.zh-TW.md">繁體中文</a> · <a href="README.ru.md">Русский</a> · <b>日本語</b> · <a href="README.tr.md">Türkçe</a> · 📖 <a href="https://opencodex.me/ja/"><b>完全なドキュメント →</b></a>
 </p>
 
-opencodex は、Codex の Responses API をプロバイダーが話すプロトコルへ変換する軽量なローカルプロキシ
-です。ストリーミング、ツール呼び出し、reasoning トークン、画像を双方向で扱います。Claude、Gemini、
-Grok、GLM、DeepSeek、Kimi、Qwen、Ollama をはじめとするどの LLM でも、Codex、Claude Code、Claude
-Desktop、Grok Build から使えます。Codex 認証用の **ChatGPT アカウントプール**も管理できます。アカウント
-を追加し、ダッシュボードでクォータを更新すれば、新しいセッションは使用量が最も少ない健全なアカウント
-へ自動的に振り分けられ、既存のスレッドは開始したアカウントに固定されたままになります。
+opencodex は、コーディングツールとモデルプロバイダーをつなぐ軽量なローカルゲートウェイです。Responses、Chat Completions、Anthropic Messages API のリクエストを受け取り、プロバイダーのプロトコルに変換します。クライアント、モデル、プロバイダーが対応する場合は、ストリーミング、ツール呼び出し、推論、画像を中継します。Claude、Gemini、Grok、GLM、DeepSeek、Kimi、Qwen、Ollama などのプロバイダーを、Codex、Claude Code、Claude Desktop、Grok Build や[クライアント対応ページ](https://opencodex.me/ja/reference/client-support/)に記載のツールで使えます。
 
 ## クイックスタート
 
 ### 個人向けインストール（CLI）
 
 ```bash
-npm install -g @bitkyc08/opencodex   # Node 18 以上。Bun ランタイムは自動で同梱されます
+npm install -g --allow-scripts=bun @bitkyc08/opencodex   # Node 18 以上。Bun ランタイムは自動で同梱されます
 ocx start                         # プロキシとダッシュボードが localhost:10100 で起動
 ```
 
@@ -101,6 +97,21 @@ ocx start                         # プロキシとダッシュボードが loca
 **http://localhost:10100** を開き、Web ダッシュボードですべて設定します。プロバイダーの追加（40 以上の
 組み込み、または任意の OpenAI 互換エンドポイント）、モデルの選択、アカウントの管理はここで行います。
 `ocx gui` でいつでもダッシュボードを開き直せます。
+
+### ツールを接続する
+
+いま使っているツールを接続します。
+
+| ツール | 接続方法 |
+|---|---|
+| Codex | ダッシュボードの **Connect** ページで Codex スイッチをオンにし、通常どおり `codex` を実行します。ローカルリスナーでは Codex の組み込みプロバイダーがプロキシを指すようになります。ターミナルからは、ダッシュボードでプロバイダーを追加する前に `ocx init` を実行し、Codex の確認に同意します。 |
+| Claude Code | `claude` CLI をインストールした状態で `ocx claude` を実行します。必要に応じてプロキシを起動し、そこを経由して Claude Code を起動します。 |
+| Claude Desktop | `ocx claude desktop` を実行します。新規インストールではアプリ全体にゲートウェイプロファイルを設定します。既存の first-party 設定は維持され、`ocx claude desktop apply --gateway` で明示的に切り替えられます。[Claude Code ガイド](https://opencodex.me/ja/guides/claude-code/)を参照してください。 切り替えた後は Claude Desktop を完全に終了してから開き直してください。 |
+| Grok Build | ローカルリスナーで Grok 連携が有効かつ `~/.grok` が存在する場合、`ocx start` がモデルを登録します。Grok Build で `ocx-*` モデルを選択してください。リモート設定は [Grok Build ガイド](https://opencodex.me/ja/guides/grok-build/)を参照してください。プロバイダーを追加した後は、プロキシを再起動する（または Codex 自動起動が有効なら `ocx ensure` を実行する）と一覧を更新できます。 |
+| 管理対象の統合があるツール | ダッシュボードの **Connect** ページか `ocx integration client enable --client <id>` を使います。 |
+| その他のツール | カスタムの OpenAI 互換ベース URL に `http://localhost:10100/v1` を、または Anthropic ベース URL に `http://localhost:10100` を設定します。 |
+
+各ツールの接続方法と対応プロトコルは[クライアント対応ページ](https://opencodex.me/ja/reference/client-support/)に記載しています。
 
 <details>
 <summary><b>デスクトップアプリ（ベータ版）</b></summary>
@@ -126,17 +137,6 @@ ocx start                         # プロキシとダッシュボードが loca
 [`AGENTS_INSTALL.md`](../AGENTS_INSTALL.md#where-things-are-installed) にはディスクに書き込まれるすべてのものをまとめています。
 
 </details>
-
-### ChatGPT アカウントプール
-
-opencodex では、Codex 認証用の **ChatGPT アカウントプール**も管理できます。ChatGPT / Codex のアカウントを
-複数追加し、5 時間 / 週間 / 30 日のクォータをダッシュボードで更新します。クォータルーティングでは、新しい
-セッションが使用量の最も少ない健全なアカウントを使えます。ラウンドロビンと fill-first はそれぞれの方針に
-従います。既存の Codex スレッドは通常、開始したアカウントとの affinity を保つので、長い SSH・tmux・
-モバイル接続のセッションが会話の途中でアカウントを乗り換えることはありません。ただしクォータの再評価、
-failover、アカウントの除外、affinity の失効、401/403 や 429 からの復帰では再バインドされることがあります。
-ふだんは使わず他が尽きたときだけ回したいアカウント（多くは Codex Desktop のログイン）があるなら、
-アカウントに選択順を指定してください。
 
 ### スポンサー
 
@@ -200,7 +200,7 @@ services:
   hub:
     pull_policy: build
     build:
-      context: https://github.com/lidge-jun/opencodex.git#main
+      context: https://github.com/lidge-jun/opencodex.git#dev
       dockerfile: Dockerfile
       target: runtime
       args:
@@ -246,7 +246,7 @@ bun run src/cli/index.ts start
 <summary>エージェント向け</summary>
 
 ```bash
-npm install -g @bitkyc08/opencodex
+npm install -g --allow-scripts=bun @bitkyc08/opencodex
 ocx start     # または `ocx service`
 ocx init      # 対話式セットアップ: ~/.opencodex/config.json を書き、Codex を接続します
 ```
@@ -280,15 +280,6 @@ CLI インストールには [Node](https://nodejs.org) 18 以上が必要です
 
 - **Codex、Claude Code、Claude Desktop、Grok Build でどの LLM でも** — 40 以上のプロバイダーが最初から
   使え、それぞれがネイティブの UI を保ちます。
-- **ChatGPT アカウントのプール** — スレッド affinity、クォータを見た自動切り替え、クールダウン、
-  fail-closed な認証処理。
-
-  > **プロバイダーポリシーに関する注意:** アカウントプールはルーティングと運用の耐障害性のためのもので
-  > あり、プロバイダーのレート制限、措置、停止その他のアカウント処分から守るものではありません。
-  > OpenCodex は、プロバイダーの制限を回避するために追加のアカウントを使うことや、アカウントの認証情報
-  > を人と共有することを推奨しません。各プロバイダーの現行の規約を守る責任は利用者にあります。
-  > [Codex Auth とアカウントプールの案内](https://opencodex.me/ja/guides/web-dashboard/)
-  > と [OpenAI の現行利用規約](https://openai.com/policies/terms-of-use/)をご覧ください。
 - **コンボ** — 1 つの仮想モデル ID で、複数プロバイダーにまたがる failover や重み付きラウンドロビンを
   組みます。[コンボガイド](https://opencodex.me/ja/guides/combos/)を参照してください。
 - **どのモデルでもサブエージェントに** — ルーティングしたモデルを Codex のサブエージェントピッカーに
@@ -439,6 +430,31 @@ opencodex は既定で `127.0.0.1` にバインドし、追加の認証を必要
 `x-opencodex-api-key` としてトークンを乗せる必要があります。詳細は
 [設定リファレンス](https://opencodex.me/ja/reference/configuration/)にあります。
 
+## 高度な使い方
+
+上級ユーザー向けのセルフホスト型オプションです。有効にする前に各プロバイダーの規約を確認してください。
+
+### ChatGPT アカウントプール
+
+opencodex では、Codex 認証用の **ChatGPT アカウントプール**も管理できます。ChatGPT / Codex のアカウントを
+複数追加し、5 時間 / 週間 / 30 日のクォータをダッシュボードで更新します。クォータルーティングでは、新しい
+セッションが使用量の最も少ない健全なアカウントを使えます。ラウンドロビンと fill-first はそれぞれの方針に
+従います。既存の Codex スレッドは通常、開始したアカウントとの affinity を保つので、長い SSH・tmux・
+モバイル接続のセッションが会話の途中でアカウントを乗り換えることはありません。ただしクォータの再評価、
+failover、アカウントの除外、affinity の失効、401/403 や 429 からの復帰では再バインドされることがあります。
+ふだんは使わず他が尽きたときだけ回したいアカウント（多くは Codex Desktop のログイン）があるなら、
+アカウントに選択順を指定してください。
+
+- **ChatGPT アカウントのプール** — スレッド affinity、クォータを見た自動切り替え、クールダウン、
+  fail-closed な認証処理。
+
+  > **プロバイダーポリシーに関する注意:** アカウントプールはルーティングと運用の耐障害性のためのもので
+  > あり、プロバイダーのレート制限、措置、停止その他のアカウント処分から守るものではありません。
+  > OpenCodex は、プロバイダーの制限を回避するために追加のアカウントを使うことや、アカウントの認証情報
+  > を人と共有することを推奨しません。各プロバイダーの現行の規約を守る責任は利用者にあります。
+  > [Codex Auth とアカウントプールの案内](https://opencodex.me/ja/guides/web-dashboard/)
+  > と [OpenAI の現行利用規約](https://openai.com/policies/terms-of-use/)をご覧ください。
+
 ## ドキュメント
 
 公開ドキュメント（インストール、プロバイダー、ルーティング、コンボ、サブエージェント、サイドカー、
@@ -480,7 +496,7 @@ Free code signing provided by [SignPath.io](https://about.signpath.io/), certifi
 
 - Committers and reviewers: [lidge-jun](https://github.com/lidge-jun)
 - Approvers: [lidge-jun](https://github.com/lidge-jun)
-- Privacy: This program will not transfer any information to other networked systems unless specifically requested by the user or the person installing or operating it.
+- Privacy: opencodex sends one anonymous daily usage summary (a per-day install hash that changes daily, version, release channel, platform, install channel, provider kind, coarse model family, active minutes and request, token and error counts; never prompts, model outputs, keys, accounts, hostnames or paths) to telemetry.opencodex.me, and only after the person installing or operating it has seen the notice in the dashboard or an interactive CLI prompt and has not declined. It can be turned off in that notice, in the Windows installer ("Send anonymous usage statistics", checked by default), in Proxy details, or with ocx telemetry disable, OCX_TELEMETRY=0 or DO_NOT_TRACK=1. Only project-wide aggregates of this anonymous data are public. A separate public leaderboard profile is off unless you connect one yourself (dashboard Home or ocx telemetry profile connect); it shares only a chosen handle, display name and colour and your daily request, token and model-family totals, never your anonymous telemetry ID, and disconnecting deletes it. Everything else goes only to the providers and services you configure. See the [telemetry guide](https://opencodex.me/ja/guides/telemetry/).
 
 ## 免責事項
 

@@ -1,6 +1,7 @@
 import { observeAccountAutoPauseRevisions, snapshotAutoPauseFingerprints } from "./account-auto-pause-revisions";
 import type { OcxConfig, OcxProviderConfig, ProviderCostOverlay } from "../types";
 import { configReasoningPinsConfigError } from "./provider-validation";
+import { carryPersistedTelemetry } from "./telemetry-carry";
 import { adoptCustomModelCatalogMigration, projectCustomModelCatalogMigration } from "../codex/custom-model-catalog-migration";
 import { refreshPreservedProviderOwner } from "../usage/user-cost-overlays";
 import { refreshConfigDerivedRegistries } from "./derived-registries";
@@ -19,7 +20,6 @@ import { withConfigMutationLockSync, bumpGenerationForCooperatingConfigWrite } f
 import { ConfigWritePublishedError, persistConfigUnlocked, readRawConfigJson } from "./persist-unlocked";
 import { configDiagnosticsFromRaw, readConfigDiagnostics, validateConfigCandidate } from "./diagnostics";
 import { normalizePersistedClaudeCode } from "./load-degrade";
-import { sanitizeRemovedOpenCodeFreeForLoad } from "./removed-opencode-free";
 import { reconcileApiKeys } from "./api-key-reconcile";
 import { captureLiveTopologyBaseline, LIVE_TOPOLOGY_KEYS, projectLiveTopology } from "./live-topology";
 
@@ -108,6 +108,29 @@ export function adoptPersistedModelDiscovery(
     baseline.modelDiscovery = structuredClone(persisted.modelDiscovery);
     baseline.disabledModels = structuredClone(persisted.disabledModels);
   }
+}
+
+/** Adopt the committed Advisor subtree without advancing unrelated pending live intent. */
+export function adoptPersistedAdvisor(config: OcxConfig, persisted: OcxConfig["advisor"]): void {
+  config.advisor = structuredClone(persisted);
+  const baseline = liveConfigBaseline.get(config);
+  // A known absent key remains rebaseable when a later disk edit adds it back.
+  if (baseline) baseline.advisor = structuredClone(persisted);
+  clearConfigTopLevelDeletionIntent(config, ["advisor"]);
+  if (baseline) clearConfigTopLevelDeletionIntent(baseline, ["advisor"]);
+}
+
+/** Adopt the committed telemetry consent subtree without advancing unrelated pending live intent. */
+export function adoptPersistedTelemetry(config: OcxConfig, persisted: OcxConfig["telemetry"]): void {
+  if (persisted === undefined) delete config.telemetry;
+  else config.telemetry = structuredClone(persisted);
+  const baseline = liveConfigBaseline.get(config);
+  if (baseline) {
+    if (persisted === undefined) delete baseline.telemetry;
+    else baseline.telemetry = structuredClone(persisted);
+  }
+  clearConfigTopLevelDeletionIntent(config, ["telemetry"]);
+  if (baseline) clearConfigTopLevelDeletionIntent(baseline, ["telemetry"]);
 }
 /**
  * The live config retains the address of the socket Bun actually opened, while
@@ -531,8 +554,7 @@ export function saveConfigPreservingClaudeCode(config: OcxConfig): void {
     const bindingBaseline = persistedLiveServerBinding.get(config);
     // One authoritative pre-write read feeds both the live-config reconciliation and
     // custom-model deletion migration. A second read could observe different bytes.
-    const onDisk = readRawConfigJson();
-    sanitizeRemovedOpenCodeFreeForLoad(onDisk);
+    const onDisk = readRawConfigJson(true);
     const pauseBefore = snapshotAutoPauseFingerprints(config);
     const baseline = liveConfigBaseline.get(config);
     let diskDeletedKeys = new Set<string>();
@@ -615,6 +637,9 @@ export function saveConfigPreservingClaudeCode(config: OcxConfig): void {
     );
     if (provenanceProjection.configRebaseProvenance === undefined) delete projectedConfig.configRebaseProvenance;
     else projectedConfig.configRebaseProvenance = provenanceProjection.configRebaseProvenance;
+    // Telemetry consent is owned by the file (see carryPersistedTelemetry).
+    const telemetry = carryPersistedTelemetry(projectedConfig, onDisk as Record<string, unknown> | undefined);
+    if (telemetry.carried) adoptPersistedTelemetry(config, telemetry.value);
     const persistedBinding = (bindingBaseline || diskDeletedKeys.has("hostname")) && onDisk
       ? readPersistedServerBinding(onDisk, bindingBaseline ?? { port: config.port, hostname: config.hostname })
       : bindingBaseline;

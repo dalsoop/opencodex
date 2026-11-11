@@ -6,6 +6,8 @@ description: Connectez opencodex à OpenCode, Pi, OMP, Hermes, OpenClaw, Kimi Co
 L'onglet **Connexion** écrit le bloc fournisseur d'opencodex dans le fichier de configuration du client,
 puis peut le retirer. Dix-huit clients fonctionnent ainsi, chacun avec son propre commutateur :
 
+Sous Windows, une surcharge exigeant un chemin absolu doit inclure une lettre de lecteur (`C:\Users\me\client`) ou un partage UNC (`\\server\share\client`). Les formes `\Users\me\client` et `/client/config`, dépendantes du lecteur courant, sont refusées. Les sélecteurs documentés comme acceptant `~` le développent depuis le répertoire personnel effectif ; Gentle Shell ne développe pas `~`.
+
 | Client | Fichier de configuration | Format | Prise d'effet de la modification | Identifiant |
 |---|---|---|---|---|
 | OpenCode | `~/.config/opencode/opencode.json` | JSON | au prochain lancement direct | `OPENCODEX_OPENCODE_API_KEY` |
@@ -24,7 +26,7 @@ puis peut le retirer. Dix-huit clients fonctionnent ainsi, chacun avec son propr
 | omo | `~/.omo/agent/models.json` | JSON | nouvelles sessions | espace réservé de bouclage |
 | Cline CLI | `~/.cline/data/settings/providers.json` + `models.json` | JSON | après arrêt et redémarrage | bouclage uniquement |
 | Kilo | premier fichier existant parmi `kilo.jsonc`, `kilo.json`, `opencode.jsonc`, `opencode.json` ou `config.json` sous `~/.config/kilo` (`XDG_CONFIG_HOME` déplace ce répertoire ; `kilo.jsonc` est créé si aucun n'existe) | JSONC | nouvelles sessions | `OPENCODEX_KILO_API_KEY` |
-| Command Code | `~/.commandcode/providers.json` (sous Windows avec le répertoire personnel par défaut : utiliser `HOME ?? USERPROFILE` uniquement si la valeur n’est ni vide ni composée uniquement d’espaces et désigne un chemin absolu Windows, sinon `homedir()` ; un répertoire personnel fourni séparément est conservé ; ajouter `.commandcode\providers.json`) | JSON | au prochain lancement de Command Code | aucun — boucle locale sans clé (`apiKey: false`) |
+| Command Code | `~/.commandcode/providers.json` (sous Windows avec le répertoire personnel par défaut : utiliser `HOME ?? USERPROFILE` uniquement si la valeur n’est ni vide ni composée uniquement d’espaces et désigne un chemin absolu Windows, sinon `homedir()` ; un répertoire personnel fourni séparément est conservé ; ajouter `.commandcode\providers.json`) | JSON | au prochain lancement de Command Code | aucun — boucle locale sans clé (`apiKey: false`) ; l’application de bureau exige sa propre connexion et opencodex n’écrit jamais `auth.json` |
 | Factory Droid | `~/.factory/settings.json` (`%USERPROFILE%\.factory\settings.json` sous Windows) | JSON | dès la détection du fichier | boucle locale sans clé |
 
 Les modèles GJC dotés d'une échelle d'effort de raisonnement prise en charge exportent `reasoning: true`, `thinking.levels` et `compat.supportsReasoningEffort`, afin que GJC propose le choix de l'effort. Les modèles Codex natifs reçoivent leur échelle standard même si le catalogue l'omet. Ces champs sont absents sans échelle connue ; `none` n'envoie pas d'effort et `ultra` devient `max` sur le réseau. Actualisez l'intégration pour mettre à jour ces options.
@@ -148,11 +150,14 @@ synchronisation, même si le document géré ne change pas.
 
 Si le fichier change après votre examen, l'écriture est refusée car le plan est devenu obsolète. La boîte de
 dialogue remplace l'ancien plan par le nouveau et vous demande de confirmer à nouveau ; elle ne relance jamais
-l'écriture automatiquement. Si l'aperçu est temporairement indisponible, rechargez normalement la page et
-recommencez l'action.
+l'écriture automatiquement. Si l'aperçu indique qu'aucun catalogue de modèles n'est encore chargé, la boîte de
+dialogue reste ouverte et propose **Charger le catalogue et réessayer** : elle relit la liste des intégrations,
+puis redemande le plan.
 
 Aside utilise le même flux d'aperçu et de confirmation pour un seul profil sélectionné à la fois. **Synchroniser
-tous les profils** reste une action groupée distincte et n'est pas liée à un aperçu combiné unique.
+tous les profils** reste une action groupée distincte et n'est pas liée à un aperçu combiné unique. Un plan décrit le fichier d'un seul profil : la carte
+de la Vue d'ensemble d'une intégration Aside en conflit propose donc **Choisir un profil**, et le bloc se
+remplace depuis la page de ce profil.
 
 ## À quoi s'attendre, en toute transparence
 
@@ -328,3 +333,19 @@ ocx integration client enable --client kilo
 ## Factory Droid
 
 Factory Droid utilise `~/.factory/settings.json` (`%USERPROFILE%\.factory\settings.json` sous Windows). Activez explicitement l’intégration avec `ocx integration client enable --client droid`, puis choisissez un modèle personnalisé dans `/model`. Les entrées gérées n’utilisent pas de clé et fonctionnent uniquement en boucle locale. La désactivation supprime ces entrées ; l’annulation restaure les octets sauvegardés. Si l’ancien `config.json` contient des entrées OpenCodex ou si `settings.local.json` remplace `customModels`, résolvez ce conflit avant l’activation. Consultez la [documentation Factory BYOK](https://docs.factory.ai/model-independence/byok).
+
+## Hermes / Command Code: model names
+
+Hermes and Command Code support `--model-names alias|routed` (API: `modelNames`).
+The default is `routed`, independent of `preferModelAliasIds`. A connection
+stores its mode; later Apply without the option preserves it. Alias mode uses
+only provider-qualified aliases that the router proves equivalent; missing,
+unsafe or colliding aliases fall back to routed keys. Combos keep their keys.
+Removed/renamed aliases migrate on the next successful managed refresh, with
+foreign-edit refusal. Named Hermes profiles need explicit Apply.
+
+`ocx export --client hermes --model-names alias --json` previews a current
+already loaded catalog without writing client files or managed state; a cold or
+stale catalog returns unavailable. Explicit `--out` writes an export artifact.
+See the [English integration guide](/guides/integrations/#opt-in-alias-model-names)
+for the canonical workflow.

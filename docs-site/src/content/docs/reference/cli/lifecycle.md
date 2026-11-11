@@ -82,14 +82,36 @@ ocx start --socks5-off
 
 ### `ocx stop [--json]`
 
-Stop the running proxy (by PID), remove the PID file, and restore native Codex. If a managed
+An unsupervised Link Child handling a shutdown signal restores native Codex and managed Grok before releasing its listener, rechecking the served connection before each write. Service/Desktop supervision, sibling ownership, restart/recycle handoff and pending parent stop receipts preserve integrations. Shutdown rejects bound restart with `409 runtime_stopping`. Forced termination can bypass signal handlers; parent `ocx stop` restoration remains necessary. To route Codex through Home again after such a stop, start the Child (`ocx start`, or `ocx service start` for an installed service) and then run `ocx sync --restart-codex`. Starting alone does not reapply routing. A sync run while the Child is stopped still reapplies routing, which points Codex at a listener that is not running, so start the Child first.
+
+Stop the running proxy (by PID), remove the PID file, and restore native Codex for standalone owners. If a managed
 background service is installed, `ocx stop` also stops it first so it cannot respawn the proxy.
+On a connected hub client, `ocx stop` leaves Codex routing, its
+model catalog and the Grok config as they are, including after a successful API stop: the connection
+owns them, and `ocx start` serves them again without re-injecting routing. Use `ocx disconnect` to hand Codex back to its own account. If Codex on a connected
+client already reads native routing, `ocx status` names `ocx sync --restart-codex` to point it back.
+An explicit stop on a Remote Link Child restores native Codex routing, catalog and backed-up
+resume-history metadata and removes the managed Grok configuration when shared restoration succeeds.
+The saved Home connection is kept; `ocx disconnect` removes it. To use Home from Codex again,
+start the Child with `ocx start` (or `ocx service start` for an installed service), then run
+`ocx sync --restart-codex`. Starting alone does not reapply routing; sync does not recreate the Grok block.
+If connection ownership cannot be confirmed before service stop, the stop API returns HTTP 409 with
+`sharedTeardown: "refused"` and keeps the proxy and service manager running. Let any pending
+connect or disconnect finish, then retry.
+A connected stop verifies the listener against the protected local runtime record before changing
+its service. Both client-role listeners and ordinary proxies must prove that identity; an ordinary
+proxy must also advertise preservation across API, signal and service shutdown in an authenticated
+read. Older or unverified runtimes are refused before
+stop actions. Update/restart that runtime through its supervisor and retry; use `ocx disconnect`
+only when you intend to release the connection-owned integrations.
+Repeated stops of an already-stopped client confirm service-manager inactivity and absence at the
+known local endpoints before returning the normal not-running result.
 While the OpenCodex desktop app is running, `ocx stop` does not keep the proxy down: the app treats
 it as an unexpected exit and starts a proxy again, within seconds for one it started and after about
 a minute for one it had only attached to. Use the app's tray **Stop proxy** (for a proxy the app
-started) or **Quit** to keep it stopped. For the same reason the dashboard's **Stop** button refuses
+started) or **Quit** to keep it stopped. For the same reason the dashboard's stop (the sidebar proxy lever pulled all the way down) refuses
 with `desktop_supervised`, and changes nothing, for a proxy the app started.
-The web dashboard's **Stop** button runs the same action (`POST /api/stop`) on every backend
+The web dashboard's stop lever runs the same action (`POST /api/stop`) on every backend
 except Windows Task Scheduler. There the wrapper can respawn the proxy after the task ends,
 and only a stop running outside the proxy can verify that restart window before restoring
 your client config — so the dashboard refuses with `respawnable_service`, changes nothing,
@@ -113,8 +135,11 @@ failure to restore shared client configuration keeps the stop failed and its rec
 carries the outcome class (`stopped`, `not-running`, `history-incomplete`, `history-deferred`,
 or `failed`), the service and proxy classifications, whether the runtime is down, and a stable
 one-line message. Exit codes are identical with and without `--json`: 0 on success, 1 on failure,
-79 when only Codex history cleanup did not complete, and 80 when the shared teardown was deferred
-and is still owed.
+79 when only Codex history cleanup did not complete, 80 when the shared teardown was deferred
+and is still owed, and 81 when a dashboard update that will restart the proxy handed Codex routing
+and its catalog to the restarted proxy instead of restoring native Codex. With 81 the proxy is
+down, and the restarted proxy releases the kept teardown after its first sync; if it never starts,
+the next `ocx stop` restores native Codex.
 
 For a desktop-approved takeover, `ocx stop --json` also accepts the complete set of
 `--expect-*` values supplied by `ocx resolve --json`. On Windows, this guarded stop can
@@ -126,6 +151,12 @@ WinSW is stopped. A `wscript.exe`, `cscript.exe`, or `cmd.exe` process with an
 unreadable command line in the approved proxy's supervision chain (or surviving under the
 stopped manager) leaves wrapper ownership unknown, so the guarded stop cannot report success.
 Missing or unreadable evidence blocks the guarded stop.
+
+New runtime records include the bound hostname. For older records that omit it, a guarded
+stop accepts the discovered default loopback address only when the remaining approval and
+ownership checks agree. An omitted hostname cannot independently prove the listener's bind
+scope. When the record contains a hostname, it must match the approved value exactly;
+wildcard and loopback binds remain distinct.
 
 ### `ocx restart`
 
@@ -152,6 +183,14 @@ Eligibility refusals name the reason and next action: use the owning installatio
 `ocx service restart` for a service, the owning terminal for a foreground proxy, or the
 owning service/desktop app on Windows. Unknown ancestry or a changed target calls for
 `ocx status` before any restart.
+
+On a connected client runtime (a Remote Link Child or a hub client), `ocx restart` asks the runtime
+to start its own replacement on the same port. If the replacement does not answer within the
+restart budget it is stopped, and the old runtime binds the port again and keeps serving; the
+command then reports the restart as not completed. A client runtime run by a background service or
+the desktop app refuses the request and keeps serving ("Restart not performed; the running client
+runtime was kept"); restart it with `ocx service restart` or from the app. See
+[Remote Link apply parity](#remote-link-apply-parity).
 
 If package files or the Bun runtime remain incomplete after the installer exited or failed,
 run `ocx status`, stop any running proxy through its owner (`ocx stop`, or its service or
@@ -257,6 +296,19 @@ opencodex local config only if all restore steps succeeded. `remove` is an alias
 Config cleanup requires ownership metadata created by a fresh install; legacy or shared directories
 are left in place.
 
+When `ocx uninstall` runs as root or from an elevated (administrator) Windows prompt, it first
+checks that no other account can change the config directory, the directories above it, or any
+directory inside it, and that no link inside the config directory leads outside it (on Windows, that it holds no links at all). If either check
+fails, uninstall stops before it changes anything and says why. Run `ocx uninstall` as the account
+that owns the config directory, without `sudo` or administrator rights, or restrict those directories
+to that account and remove such links, then run it again. On Windows ARM64, where opencodex cannot
+tell whether the prompt is elevated, the same check applies; if it cannot be completed, stop opencodex
+and remove the config directory yourself.
+
+A recorded entry whose parent directory inside the config directory is a link (a symlink or junction)
+is left in place and listed as a remaining path, and the run ends as a partial uninstall. Replace that
+link with the real directory or remove it, then run `ocx uninstall` again to finish.
+
 Both commands accept no arguments. Unsupported flags (including `--dry-run` and `--yes`)
 exit with usage status 2 before preflight or teardown; no changes are made.
 For help, run `ocx help uninstall` or `ocx help remove`.
@@ -272,12 +324,42 @@ restart the proxy using the intended current installation; for a background serv
 or resolve `PATH` to the intended installation. These diagnostics do not repair the service or
 change whether requests are allowed.
 
+If an update restart reports a blank hostname in the runtime record, it leaves the proxy running.
+Use `ocx status` and `ocx service status` as clues, not proof of ownership or the actual bind.
+Once ownership is verified, for a service use the owning installation's `ocx service restart`;
+for Desktop, use the app; for a foreground proxy, use its terminal. A standalone proxy started by `ocx ensure` may be
+detached and have no terminal:
+
+1. Independently verify the process identity, installation, home, supervisor and actual listening
+   address and port. Use OS process and listener inspection with sufficient permissions; check
+   IPv4, IPv6 and wildcard listeners as applicable. A PID alone can be reused, and missing or
+   incomplete inspection results do not prove ownership or absence. For example, on macOS or
+   Linux where `lsof` is available, `ps -p <pid> -o pid=,ppid=,args=` and
+   `lsof -nP -iTCP:<port> -sTCP:LISTEN` provide process and listener clues. They do not by
+   themselves establish the home, supervisor, or complete visibility; use the appropriate OS
+   tools and permissions to verify those separately.
+2. Only if those facts are verified and forced termination is acceptable, the owner can run
+   `ocx stop` from the owning installation and home. It tries a graceful stop first, but may
+   fall back to forced termination if that fails; it can also refuse, including when the blank
+   hostname prevents guarded ownership verification. Do not bypass a refusal.
+3. Independently confirm the identified process has exited, no supervisor will restart it,
+   and the intended address and port are free. A successful stop or a status result alone is
+   not proof of all three. Once confirmed, run `ocx start` from the intended installation and
+   home with the intended bind and port settings; a successful start regenerates the record.
+
+If any check is incomplete, the stop fails or is refused, or forced termination is unacceptable,
+stop and ask the owner or administrator to investigate. Do not edit the runtime record or kill
+unrelated processes. Retry the update restart if needed after the new proxy is running.
+
 Identical version strings and the `unknown` / `0.0.0` placeholders suppress the warning, as does
 an absent proxy version. Doctor does not report placeholders as a confirmed match. Different
 strings still produce a neutral warning when they cannot be strictly parsed as SemVer or differ
 only in build metadata; neither side is called older. Versions are not trimmed and a leading `v`
 is not normalized. JSON exposes the same advice in `versionSkew`, whose fields remain
 `cliVersion`, `proxyVersion`, `skewed`, and `warning`.
+
+On a Remote Link Child and its Home, `--json` also reports `appliedCodexSettingsDigest`,
+`lastApplyAt` and `runtimeStartedAt`; see [Remote Link apply parity](#remote-link-apply-parity).
 
 Print a read-only diagnostic summary: proxy PID, `/healthz` reachability, dashboard URL, config path,
 default provider, Codex autostart setting, service state, shim state, and the redacted effective Codex
@@ -394,12 +476,19 @@ not traffic missed between polls; injection seq cannot exclude restart/eviction 
 Check post-sync readiness through the unauthenticated `GET /readyz` endpoint. It returns `200` when
 ready, or `503` with `Retry-After: 1` for `pending` and terminal `failed`. Its sanitized HTTP identity
 is `{service, version, uptime, pid, port, status}` plus the remote-hub protocol fields
-`{protocol, minimumClientProtocol, managementUrl}`. `protocol` is the hub protocol this proxy
+`{protocol, minimumClientProtocol, managementUrl, features}`. `protocol` is the hub protocol this proxy
 speaks and `minimumClientProtocol` the oldest client it still accepts, so a client can refuse an
 incompatible pairing before sending anything else. `managementUrl` is the origin a client should
 use for the management plane: the configured `hub.managementPublicOrigin` when `runtimeRole` is
 `hub`, and otherwise the origin the request itself arrived on. A readiness request with no
-HTTP(S) origin is rejected rather than answered with a guess. Old proxies without `/readyz` fail
+HTTP(S) origin is rejected rather than answered with a guess.
+`features` lists the peer features this build serves, so a peer can check a capability without
+comparing versions: `relay-auth/<n>` names the Remote Link relay authentication version,
+`link-management-relay` the read-only Remote Link management relay, `link-peer-report/<n>` that
+a Remote Link Home reports each Child's version and compatibility in `ocx link status`, `quota-pool/1` the
+`GET /api/quota-pool` management read, and `served-by-header` the `x-opencodex-served-by` response
+header. A feature this build does not serve is absent. The list holds fixed names only, never
+account or configuration data. Old proxies without `/readyz` fail
 closed as `unreachable`; `/healthz` is separate liveness, not readiness. The command performs one probe by
 default; `--wait` polls until ready or timeout, but exits immediately when it observes the terminal `failed` state. The
 default timeout is 45 seconds; `--timeout <seconds>` requires `--wait` and accepts positive integer seconds from 1–300.
@@ -407,6 +496,12 @@ The CLI's own `--json` output is deliberately narrower than the HTTP body: it em
 `{ready, status, pid, port}`, where `status` is `ready`, `pending`, `failed`, or
 `unreachable`. Exit codes are 0 for ready; 1 for not-ready, pending, failed, timeout, or
 unreachable; and 64 for invalid arguments.
+
+On a Remote Link Child, readiness also covers the link. While the link cannot carry a request,
+`/readyz` answers `503` with `status: "pending"` and `link: {state: "unavailable", reason}`, so
+`ocx ready --wait` keeps waiting until the link is back; a working link adds
+`link: {state: "available"}` to the `200` answer. `/healthz` on a Child keeps meaning only that the
+process runs. The reasons are listed in [Remote Link](/guides/remote-link/#link-status).
 
 ### `ocx resolve [--json]`
 
@@ -455,9 +550,12 @@ of deleting anything.
 
 Run read-only environment and connectivity diagnostics: state paths and filesystem type, WSL dual
 installs, proxy environment/config, ChatGPT reachability, Codex plugin and project-config warnings,
-and pending history migration. The Codex app-home targeting section also detects the narrow Windows
-Orca runtime-home mismatch and explains service migration when applicable. Paths shown by this
-diagnostic redact the OS username. Doctor prints repair hints but does not apply them.
+and pending history migration. The **Native main refresh** section reads admission status from the
+running proxy's authenticated, read-only native-main admission endpoint, so a separately launched `ocx doctor`
+reports the service's `foreign-ownership` or other fence reason; if the proxy cannot be queried it
+reports admission as unavailable. The Codex app-home targeting section also detects the narrow
+Windows Orca runtime-home mismatch and explains service migration when applicable. Paths shown by
+this diagnostic redact the OS username. Doctor prints repair hints but does not apply them.
 
 Project-config diagnostics ignore provider examples inside TOML multiline strings, including
 `developer_instructions`. Real provider and profile settings after the closing delimiter are still
@@ -491,9 +589,34 @@ See [v2 outcomes](/reference/cli/agents/#explicit-v2-target-and-outcome) and
 for target, scope and spending boundaries. A reset-grant status read can contact
 upstream status but never consumes or resumes a grant.
 
-### `ocx sync [--restart-codex] [--restart-app-server-only]`
+### `ocx sync [--expect-link <linkId> | --expect-hub-key <apiKeyId>] [--local-only] [--json] [--restart-codex] [--restart-app-server-only]` <span id="ocx-sync---restart-codex---restart-app-server-only"></span>
+
+On a Remote Link Home, a successfully committed current catalog is also synced to eligible linked
+Children. `--local-only` disables this fan-out. `--json` prints one `ocx.sync.fanout/1` result with
+the Home outcome and each Child's state. A connected Child skipped during fan-out includes its reason
+and an actionable `hint` in JSON and human output. Update OpenCodex on an older Child to at least
+2.93.0 using the installer that owns the selected `ocx`. For a Desktop install on headless Windows,
+use **Check for Updates** in the signed-in Desktop tray. A link
+mismatch may require re-linking the Child, while an updating Child can be retried after the update.
+The Home's own nonzero exit code is returned unchanged. When the Home exits 0, a connected Child
+skipped during fan-out, a failed or timed-out Child, or an unreadable link store produces exit 6.
+Intentional skips such as client-initiated links and `--local-only` keep their existing exit behavior.
+An unreadable link store produces a path-free error in human output. Exit 7 is reserved
+for an update in flight.
+If the Home sync throws in JSON mode, stdout still contains one result document and stderr gives a
+sanitized failure message.
+
+Fan-out never requests a Codex app or app-server restart on a Child. Use GOAT, run
+`ocx sync --restart-codex` on a full `ocx` Child, or restart the Codex desktop app and long-lived `app-server` processes separately on a lightweight `ocx-child` Child if a Codex restart is needed. The Child's pinned sync may
+still restart its own OpenCodex client runtime after applying changed Home settings. If the Home
+times out and stops its local SSH process, a remote sync already running may continue on the Child.
+
+If an update is in flight or the shared update/sync mutex cannot be determined, sync changes nothing, reports `update-in-flight`, and exits 7. If another sync holds the mutex, it reports `sync-in-progress` and exits 1; a Home counts that Child as failed and exits 6 when its own sync succeeded. With `--json`, either refusal prints one result document with the Home skipped and the refusal reason in `fanout.reason`.
 
 An explicitly requested restart also runs after a successful committed `config.toml` change, even if the catalog and cache bytes are unchanged. A configuration-only no-op, refusal, preflight, or rolled-back write does not trigger it. Without a restart flag, sync never automatically restarts Codex.
+
+On a Remote Link Child, `ocx sync` also applies the Home's Codex settings and, when the client runtime
+started before that apply, restarts it; see [Remote Link apply parity](#remote-link-apply-parity).
 
 Fetch the live model list from every configured provider and re-inject the merged catalog into Codex.
 Run it after adding a provider or to refresh available models.
@@ -521,6 +644,46 @@ and a stale picker is not.
 
 When the command runs from inside the Codex app, the restart is handed off to a detached helper
 and this session ends with the app.
+
+#### Sync only from the expected Home: `--expect-link` and `--expect-hub-key`
+
+```bash
+ocx sync --expect-link <linkId> [--restart-codex]
+ocx sync --expect-hub-key <apiKeyId> [--restart-codex]
+```
+
+A script that reads `ocx connect status --json` and then runs `ocx sync` cannot tell whether the
+machine was disconnected or relinked to another Home in between; a plain `ocx sync` would then
+sync the local providers or the other Home's catalog. Passing the identity you read closes that
+gap. `--expect-link` takes the `link.linkId` of a Remote Link Child and `--expect-hub-key` the
+`apiKeyId` of a hub client. The check runs under the same lock that chooses the sync path, and
+every later write is bound to the connection that passed it.
+
+When the identity holds, the command is exactly the connected sync above. Otherwise it changes
+nothing (not even the automatic Codex shim repair other commands run first), never syncs the local
+providers, exits **5**, and prints a human line followed by one JSON line as the last line on stderr:
+
+```json
+{"phase":"child_link_mismatch","reason":"other_link"}
+```
+
+`phase` is `child_link_mismatch` for `--expect-link` and `hub_client_mismatch` for
+`--expect-hub-key`.
+
+| `reason` | Machine state |
+| --- | --- |
+| `disconnected` | Not connected to any Home or hub |
+| `invalid_state` | The client configuration or a connect marker cannot be read |
+| `disconnect_pending` | A disconnect has started and not finished |
+| `pending_operation` | A key rotation, a connect, or another sync is in progress (including one that holds the locks this check needs) |
+| `hub_client` | `--expect-link` on a hub client |
+| `link_client` | `--expect-hub-key` on a Remote Link Child |
+| `other_link` / `other_key` | Connected, but to a different link or with a different key |
+
+A missing or malformed value, a repeated flag, or both flags together exit 2 before any state is
+read. A connection that changes after the check, while the catalog is being fetched, still fails
+as a plain connected sync does (exit 1, nothing written). Versions without these flags ignore
+them, so check `ocx --version` first.
 
 ### `ocx sync-cache [--restart-codex] [--restart-app-server-only]`
 
@@ -663,10 +826,15 @@ Launchd restarts the proxy after a crash or failed restart handoff, but leaves i
 the service deliberately exits cleanly because the desktop app owns the runtime. Run
 `ocx service repair` once to apply this behavior to a service installed by an older version.
 
-Definitions installed before this change still carry the old versioned paths and cannot migrate
-themselves — once the old executable is deleted, no opencodex code runs to fix it. Run
-`ocx service repair` once after upgrading. Linux service starts then follow the launcher; macOS
-repair writes the new package paths into the launchd definition.
+Definitions installed before this change do not have the resolved `CODEX_HOME` and `OPENCODEX_HOME`
+pinned for service restarts. After upgrading, run `ocx service repair` once so the generated shell
+reasserts both homes after login-profile initialization and Task Scheduler keeps absolute home paths
+rather than expanding the task's runtime profile variables. Repair also refreshes old versioned paths;
+if the old executable was already deleted, reinstall opencodex before repairing. Linux service
+starts then follow the launcher; macOS repair writes the new package and home paths into the launchd
+definition.
+On macOS, install and repair refuse a home or proxy environment value that contains a control
+character an XML plist cannot hold (for example U+0001); the error names the variable to fix.
 An already-running proxy is not replaced by an external upgrade: when the installed CLI is newer
 than the running proxy, run `ocx service restart` so the new build serves. On macOS, `repair` is not
 enough there: the definition did not change, and a repair that changes nothing reloads nothing.
@@ -681,13 +849,15 @@ If the proxy is newer instead, check the CLI installation and `PATH` as describe
 | `restart` | The same refresh and a guaranteed restart on every platform. On macOS an unchanged, already-loaded job is kickstarted in place. Not an alias of `repair`. |
 | `start` | Start an installed service. |
 | `stop` | Stop the service and restore native Codex. |
-| `status` | Report service and proxy diagnostics plus log paths. |
+| `status` | Report service and proxy diagnostics plus log paths. `--json` prints the passive document described below. |
 | `uninstall` | Remove the service and restore native Codex. |
 | `remove` | Alias of `uninstall`. |
 
 On Windows, a bare `ocx service` runs the install path only after both Task Scheduler and WinSW are
 proven absent. If either status query is inconclusive, it refuses to register anything and asks you
 to run `ocx service status`; use explicit `ocx service install` only after confirming absence.
+
+`ocx service status --json` prints one passive document for scripts and peers such as GOAT's device inventory. It runs the same reads as the text report and never installs, starts, stops or repairs anything; `--json` on any other `service` verb is rejected. Fields: `schemaVersion` (1), `platform`, `supported`, `backend` (`launchd`, `systemd`, `schtasks`, `winsw`, or `none` when nothing is registered), `label` (the job, unit, task or WinSW service name), `installed`, `enabled`, `running` (the service manager's verdict), `viable`, `stale`, `conflict`, `serving` (`probed`, `ok`, `port`; probed only when a registration exists), `summary`, `logPath`, `ownershipLease` and `desktopLogin`. An unsupported platform or a Docker container still gets a document, with `supported: false`.
 
 ### Runtime ownership
 
@@ -827,6 +997,22 @@ identity-verified OpenCodex proxy reachability. It does not print the localized 
 so the summary remains readable across Windows code pages. Transactional-backup recovery
 logs a fixed success message rather than the backup directory name; backup names containing
 shell metacharacters do not become commands in that log message.
+
+On Windows, uninstalling an elevated-registered `opencodex-proxy` task can require an
+elevated terminal. If deletion is denied, or exits with code 1 while the task is still
+present, OpenCodex reports the elevation requirement and preserves the service assets.
+Open PowerShell or Terminal with **Run as administrator** and run:
+
+```powershell
+schtasks /delete /tn opencodex-proxy /f
+```
+
+Then rerun `ocx service uninstall` from the original account to finish cleanup, and check
+`ocx service status`. Access-denied start/stop commands name their corresponding elevated
+`schtasks` command. Scheduler failures use stable diagnostics and exit codes rather than
+echoing localized child stderr, which may use a different Windows code page. An absent or
+unreadable task after a failed delete keeps exit code 1 alone from confirming an access
+denial; recognized access-denied text from the delete is still classified as one.
 
 On Windows, creating the Task Scheduler entry requires elevation. Recognized localized
 access-denied text keeps the existing guidance path. If that text is unreadable, the fallback
@@ -1024,7 +1210,7 @@ When a newer package version is known, the tray adds a blue dot to its online, w
 
 ### `ocx gui`
 
-Open the [web dashboard](/guides/web-dashboard/) at `http://localhost:<port>` — or at
+Open the [web dashboard](/guides/web-dashboard/) at `http://127.0.0.1:<port>` — or at
 `http://127.0.0.1:<management port>` when hub management ingress is enabled — auto-starting the proxy
 if it is not running.
 
@@ -1037,6 +1223,45 @@ package registry or install an update.
 
 ### `ocx update [--tag latest|preview]`
 
+#### Orchestrated update
+
+Automation can discover support with `ocx capabilities --contracts --json`; the
+`contracts` array contains `update.orchestrated/1`. The contracts-only option
+cannot be combined with `--route` or `--mutating-only`.
+
+```bash
+ocx update --plan --json [--tag latest|preview | --version <version>]
+ocx update --yes --json [--version <version>] [--expect-plan <token>] [--not-after <unix-ms>]
+```
+
+Plan emits one `ocx.update.plan/1` JSON object: `currentVersion`, `targetVersion`,
+`installer`, `runtimeOwner`, `servingPath`, `cliPath`, `canApply`, optional `reason`,
+`restartRequired`, `planToken`, `updateInFlight`, and `mutationBoundMs`. A plan is
+read-only. Reasons are `desktop-app-owned`, `source-checkout`, `mise-managed`,
+`installer-unknown`, `plan-unavailable`, `serving-install-unknown`,
+`cli-not-serving-install`, `runtime-ownership-refused`, `target-unresolved`,
+`downgrade-refused`, and `up-to-date`. `desktop-app-owned` directs updates to the
+Desktop app; uncertain serving identity refuses rather than guessing. Run `ocx start`
+or `ocx stop` to settle a stale runtime record before planning again.
+
+Apply emits one `ocx.update.result/1` object with `applied`, `fromVersion`,
+`toVersion`, `installer`, `restarted`, `healthy`, `rolledBack`, and an optional
+`error`. Pass the plan's `planToken` as `--expect-plan` to refuse with
+`plan-changed` if the selected install or runtime identity changes. `--not-after`
+is a positive safe integer Unix timestamp in milliseconds; mutation is refused with
+`deadline-passed` after that time. `mutationBoundMs` is 900000 (15 minutes): an
+overrun reports an uncertain result without killing an in-progress transaction.
+`updateInFlight` remains true while an update may still mutate, including when its
+state cannot be determined; a sync alone does not set it. A concurrent sync can
+refuse apply with `sync-in-progress`, and another update with `update-in-flight`.
+
+Orchestrated apply exits 0 when verified or already up to date, 10 on refusal,
+11 when the update failed but the previous version is verified active (including
+the runtime when required), 12 when the outcome is unverified or still running,
+and 64 for invalid usage. `rolledBack` is true only when an actual installer
+rollback and its verification succeeded. A plan command emits its plan with exit 0;
+the `canApply` and `reason` fields describe eligibility.
+
 Compiled standalone installs, including the Windows MSI Desktop bundle, are updated through **Check for Updates…** in OpenCodex Desktop, or by reinstalling the standalone binary from [GitHub Releases](https://github.com/lidge-jun/opencodex/releases). `ocx system update check` reports `installer: "standalone"`, `canUpdate: false`, and `reason: "standalone_install"` with that guidance. `ocx update` exits unsuccessfully with the same hint; it does not run a package-manager update for the compiled executable. A genuine source checkout still reports `installer: "source"` and `reason: "source_checkout"`.
 
 When OpenCodex is installed through mise, this command exits unsuccessfully before stopping the proxy or changing package files and shows `mise upgrade <tool>`, using the verified local mise alias. Update checks remain available and report the installation as externally managed. An unreadable or inconsistent mise ownership record fails closed without guessing a tool name, and `--tag preview` never changes mise's configured selection.
@@ -1048,7 +1273,15 @@ unless you pass `--tag latest|preview`. It detects a source checkout and tells y
 `git pull && bun install` instead, and is a no-op if you are already on the newest version for that
 tag. Before stopping anything, npm installations run a bounded Unix cache ownership and access
 check. Nested symlinks are checked with `lstat` but not followed; Windows explicitly skips this
-Unix-only check. A failure aborts while the tray and proxy are still running. A running proxy is
+Unix-only check. A failure aborts while the tray and proxy are still running.
+For Bun installations, `ocx update` runs an early configuration preflight before stopping the proxy:
+if `config.json` cannot be read (including dangling symlinks) or requires diagnostics fallback or salvage,
+the update aborts with exit code 1 while the service and tray continue running. For a readable
+but invalid file, run `ocx config validate` to diagnose it, then back up and correct the file.
+Validation does not change the file. For an unreadable or non-regular entry, inspect the config
+path, permissions, and any symlink target; correct them or restore a readable regular config from
+a trusted backup before retrying. Validation may report defaults when a symlink target is missing,
+so its success alone does not resolve that condition. Reparable configurations do not abort. A running proxy is
 then stopped before files are replaced; an installed service is rebuilt and started automatically,
 while a foreground installation prints `ocx start` as the next step. Dashboard update records
 redact profile/cache paths and UID/GID values before they are persisted.
@@ -1097,6 +1330,80 @@ target, mode, schedule and optional last/next-run facts. `job.status` describes 
 existing idle/running state, not a cleanup started by this command. Read back on
 an unknown outcome rather than replaying the write.
 
+## Remote Link apply parity
+
+A Remote Link Child applies its Home's OpenCodex-owned Codex settings when it is linked
+(`ocx link add` on the Home) and on every `ocx sync`. Three facts let a peer check that the
+Child really runs under the settings it applied, without reading either machine's configuration.
+
+`ocx status --json`, on any device, carries:
+
+| Field | Meaning |
+| --- | --- |
+| `appliedCodexSettingsDigest` | Lowercase hex SHA-256 of the applied settings (below). On a Child, the values its last recorded apply wrote. On a Home or standalone install, the settings document it serves its Children right now, computed from its current configuration. `null` on a hub client, on a Child with no recorded apply, and on a Child whose apply of changed settings is in progress or failed (the previous digest is withdrawn first, so it is never reported for values Codex no longer has). |
+| `lastApplyAt` | Child only: epoch milliseconds of the last successful apply that changed the applied settings. Re-applying the same values is not a new apply and keeps it, so an unchanged `ocx sync` never forces a restart. `null` elsewhere. |
+| `runtimeStartedAt` | Child only: epoch milliseconds the running client runtime started. `null` when no client runtime answers. |
+
+The digest is computed over this compact UTF-8 JSON, with the keys in exactly this order and no
+whitespace, from the values actually applied:
+
+```json
+{"version":1,"settings":{"fastMode":true,"multiAgentMode":"v1","webSearchSidecarEnabled":false,"subagentDefaults":null}}
+```
+
+`subagentDefaults` is `null` when unset, otherwise `{"model":…,"reasoningEffort":…}` in that order.
+The example above hashes to `57c751eff89844f93db71a6ee4acdac03afbc29fec52734ade80a40193e826cd`. The digest
+never contains a setting value, and the Home's name and version are not part of it, so a Home and
+a Child that applied the same values report the same digest.
+
+On the Home, every row of `ocx link status --json` carries what that Child last reported:
+`lastApplyAt`, `runtimeStartedAt`, `appliedCodexSettingsDigest` (same meanings as above) and
+`reportedAt` (epoch milliseconds, the Home's clock). A linked Child reports shortly after its runtime
+starts and then once a minute; the Home keeps reports in memory only, so after a Home restart the
+fields read `null` until the next report. A Child whose runtime started before `lastApplyAt` is
+running an older runtime than its last apply.
+
+With a Home and CLI that support it, each row also carries a `child` block: the Child's running and
+installed versions, its version skew against the Home, its update route, whether it last downloaded the
+Home's current catalog, whether a relayed model request is running, and the last operation. Installed
+version and update route come from `ocx link check (--link-id <id> | --all) [--no-wait] [--json]`, which
+runs the Child's `ocx update --plan` over SSH for each Home-initiated link (60 seconds per Child, three at
+a time) and changes no install. A POSIX Child older than 2.97.0 gets one more read-only SSH call for its
+version; a Windows Child that old reports the version it sent over the link. The fields are described in
+[Home and Child versions](/guides/remote-link/#child-install-catalog-and-activity).
+
+Lightweight `ocx-child` Child hosts run `ocx-child sync [--expect-link <id>] [--json]`, `ocx-child status [--json]` (while `ocx link status --json` remains on the Home), and `ocx-child disconnect` / `ocx-child detach`: on an attached `ocx-child` host (which runs without a system service manager), a successful `ocx-child sync` starts `ocx-child serve` if no relay is running even when settings are unchanged, rolls it over when `runtimeStartedAt < lastApplyAt`, and posts a best-effort parity report on non-stale syncs. `ocx-child sync` accepts `--restart-codex` / `--restart-app-server-only` for flag compatibility without restarting Codex processes (restart the Codex desktop app and long-lived `app-server` processes separately if needed), and `ocx-child disconnect` / `ocx-child detach` restores `~/.codex` files offline and stops `ocx-child serve` with zero background daemon left running. Only one `ocx-child` install may manage a given `CODEX_HOME` at a time: lifecycle commands lock `CODEX_HOME/.ocx-child.lock` (kept permanently) and record the owning `OPENCODEX_HOME` in `CODEX_HOME/.ocx-child-owner.json` until `ocx-child detach` completes, so an `ocx-child attach` or `sync` from a different `OPENCODEX_HOME` sharing that `CODEX_HOME` exits nonzero without changing any file and names the owning home to detach first.
+
+## Remote Link Child attestations
+
+A peer that sends work through a Remote Link Child can check two more facts in the Child's
+`ocx status --json`. Both fields are omitted, never `null`, when they cannot be proven.
+
+| Field | Meaning |
+| --- | --- |
+| `localCredentials` | `{count, generation}`. `count` is the number of provider credentials this installation stores on this machine: OAuth accounts, provider API-key slots (including disabled entries and keychain or environment references), Codex account-pool records, the native Codex `auth.json` and inactive native Codex profiles. Link keys, management tokens and incoming API keys do not count, and neither do the accounts a Home serves. `generation` is opaque and changes whenever a stored credential is added, replaced or removed, even when the count ends where it started. Reported only while an OpenCodex runtime on this machine is running and every store reads completely. A native Codex configuration whose `cli_auth_credentials_store` is not `file` omits it. |
+| `link.connectionGeneration` | On a Child: opaque, and changes whenever the tunnel to its Home connects (including a reconnect that keeps the same link) and whenever either runtime restarts. Reported only while the Child's runtime is ready. For a link started from Home, the Child learns it from the Home's signed answer, so a Home on an older release leaves it out. |
+
+A Child that reports `localCredentials.count` 0, with `localCredentials.generation` and
+`link.connectionGeneration` unchanged across a request, had no local provider credential during it
+and observed no tunnel reconnect.
+
+For a link the Home added, each row also carries `tunnel`: `attempt` (ssh attempts since the link
+was last connected), `nextRetryAt` (ISO time of the next scheduled retry, `null` while one runs or
+none is due), `lastTransition` (`{from, to, at, cause}`) and `lastFailure` (`{cause, at}`). A cause
+is one of `auth`, `hostkey`, `forward`, `remote_forward_conflict`, `timeout`, `network`,
+`unknown`, `spawn_failed` and `listener_unavailable`. The Home keeps it in memory, so it starts
+empty after a Home restart. `GET /api/link/status` includes the field only when asked with
+`?diagnostics=1`, because an older `ocx link status` rejects fields it does not know.
+
+After `ocx sync` applies the Home's settings on a Child, it restarts the Child's client runtime when
+that runtime started before `lastApplyAt`, using the same restart as `ocx restart`. A runtime that
+already started after the apply is left alone, on a full `ocx` Child nothing is started when no client runtime is
+running (unlike an attached `ocx-child`, which starts `ocx-child serve` when absent), and on a full `ocx` Child a failed restart exits nonzero while the previous runtime keeps serving (whereas on `ocx-child`, rollover stops the prior `ocx-child serve` before binding the replacement, so a failed rollover exits nonzero with no relay running until `ocx-child sync` or `ocx-child restart` retries). Two applies on one Child never interleave. On a full `ocx` Child, a second `ocx sync` while one is
+applying fails fast and changes nothing. On `ocx-child`, a second `ocx-child sync --expect-link <id>`
+(the form the Home's sync fan-out runs) exits `5` with reason `pending_operation` and changes
+nothing, while a plain `ocx-child sync` waits for the first apply to finish and then runs.
+
 ## Forced link revoke and remote recovery
 
 Only when skipping remote cleanup is explicitly intended, use the actual selected
@@ -1131,6 +1438,8 @@ See [Hub observation and recovery](/guides/remote-workspace/#inspect-the-hub-wit
 ## Remote Hub client lifecycle
 
 Use `ocx connect <url> --pairing-code-stdin`, `ocx connect status`, `ocx sync`, and `ocx connect rotate --pairing-code-stdin`. The initial catalog download fails after five seconds without incoming bytes, but active transfers may run longer; use `--catalog-timeout <seconds>` (1–120) to override that inactivity window. `ocx disconnect` restores local state offline and does not revoke the hub key. While connected only, `ocx connect revoke --admin-token-stdin` revokes the persisted `apiKeyId`; after disconnect use the hub's **Connect → API Keys** page. Secrets are stdin-only and never belong in argv.
+
+On a Remote Link Child, `ocx connect status` also prints a `Link tunnel:` line (`up`, `down (<reason>)` or `unknown (<reason>)`) read from the running Child's `/readyz`, and `--json` adds `linkTunnel`. `Connection: connected` still means only that the machine is linked; see the [Remote Link guide](/guides/remote-link/).
 
 ## Setup port validation
 

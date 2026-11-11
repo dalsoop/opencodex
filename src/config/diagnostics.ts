@@ -8,9 +8,11 @@ import { join } from "node:path";
 import * as z from "zod/v4";
 import { compactionRecoveryConfigError } from "./schema/compaction-recovery";
 import { nativeReasoningRetentionConfigError } from "./schema/native-reasoning-retention";
+import { WORKFLOW_BUDGET_SHAPE_HINT, workflowBudgetConfigError } from "./schema/workflow-budget";
 import { desktopCompatibilityConfigError } from "./schema/desktop-compatibility";
 import { blockedModelRedirectsError } from "./schema/blocked-model-redirects";
 import { mainAccountHardLockFallbackError } from "./schema/main-account-hard-lock-fallback";
+import { fallbackPolicyError } from "./schema/fallback-policy";
 import type { OcxConfig } from "../types";
 import { anthropicAccountPoolConfigError, anthropicOAuthInstanceConfigError, anthropicSidecarConfigError } from "./schema/anthropic-account-pool";
 import { configReasoningPinsConfigError } from "./provider-validation";
@@ -21,7 +23,7 @@ import { isMissingPathError } from "./atomic-write";
 import { getConfigDir, getConfigPath } from "./paths";
 import { getDefaultConfig } from "./proxy-env";
 import { salvageConfigCandidate } from "./salvage";
-import { sanitizeRemovedOpenCodeFreeForLoad } from "./removed-opencode-free";
+import { projectRemovedOpenCodeFreeSnapshot } from "./removed-opencode-free-backup";
 import { sanitizeOpenCodeOverridesForLoad } from "./opencode-wire-upgrade";
 import {
   sanitizeReasoningPinsForLoad,
@@ -47,6 +49,7 @@ import {
   malformedQuotaResetNotifyWarning,
   malformedCatalogAutoRefreshWarning,
   malformedCodexPoolWarning,
+  malformedTelemetryWarning,
   malformedSpendWarning,
   rawConfigRecord,
   malformedNativeSubagentFields,
@@ -79,6 +82,7 @@ import {
   compactionRoutingSchema,
   reasoningRetentionSchema,
   skillsConfigSchema,
+  telemetryConfigSchema,
   memoryModelsSchema,
 } from "./schema/leaf-validators";
 
@@ -144,7 +148,9 @@ function validFileConfigDiagnostics(config: OcxConfig, rawParsed: unknown): Conf
   warnings.push(...degradedListenerWarnings(rawParsed, normalized));
   if (blockedModelRedirectsError(rawParsed)) warnings.push("blockedModelRedirects ignored: expected a map of nonempty model keys to nonempty string targets");
   if (nativeReasoningRetentionConfigError(rawParsed)) warnings.push("nativeReasoningRetention ignored: expected only optional boolean modelSwitch and accountSwitch fields; both remain off");
+  if (workflowBudgetConfigError(rawParsed)) warnings.push("workflowBudget ignored: " + WORKFLOW_BUDGET_SHAPE_HINT + "; the built-in ceilings remain");
   if (mainAccountHardLockFallbackError(rawParsed)) warnings.push("codexMainAccountHardLockFallback ignored: expected a nonblank model selector and an optional declared reasoningEffort");
+  if (fallbackPolicyError(rawParsed)) warnings.push("fallback partly ignored: expected boolean model/provider switches, providers/routes/devices maps of them, and devices.<id>.localFallback; ignored leaves keep today's fallback behavior");
   const quotaAutoRefreshWarning = degradedCodexQuotaAutoRefreshWarning(rawParsed, normalized);
   if (quotaAutoRefreshWarning) warnings.push(quotaAutoRefreshWarning);
   if (rawEffort !== undefined && !isClaudeSubagentEffort(rawEffort)) {
@@ -171,6 +177,8 @@ function validFileConfigDiagnostics(config: OcxConfig, rawParsed: unknown): Conf
   if (catalogRefreshWarning) warnings.push(catalogRefreshWarning);
   const codexPoolWarning = malformedCodexPoolWarning(rawParsed);
   if (codexPoolWarning) warnings.push(codexPoolWarning);
+  const telemetryWarning = malformedTelemetryWarning(rawParsed);
+  if (telemetryWarning) warnings.push(telemetryWarning);
   const spendWarning = malformedSpendWarning(rawParsed);
   if (spendWarning) warnings.push(spendWarning);
   const retentionWarning = degradedReasoningRetentionWarning(rawParsed, normalized);
@@ -198,7 +206,7 @@ export function subagentDefaultSyncEffective(
 }
 
 export function mergeConfigDefaults(parsed: unknown): unknown {
-  if (!parsed || typeof parsed !== "object") return parsed;
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return parsed;
   const defaults = getDefaultConfig();
   const raw = parsed as Record<string, unknown>;
   // Same absence-is-meaningful pin as the repair merge above.
@@ -705,6 +713,16 @@ function skillsConfigError(value: unknown): string | null {
   return "schema_invalid: skills" + (field ? "." + field : "") + ": " + (issue?.message ?? "invalid configuration");
 }
 
+export function telemetryConfigError(value: unknown): string | null {
+  const raw = rawConfigRecord(value);
+  if (!raw || !Object.hasOwn(raw, "telemetry") || raw.telemetry === undefined) return null;
+  const result = telemetryConfigSchema.safeParse(raw.telemetry);
+  if (result.success) return null;
+  const issue = result.error.issues[0];
+  const field = issue?.path.join(".");
+  return "schema_invalid: telemetry" + (field ? "." + field : "") + ": " + (issue?.message ?? "invalid configuration");
+}
+
 export function validateConfigCandidate(value: unknown): { ok: true; config: OcxConfig } | { ok: false; error: string } {
   const chatgptDesktop = rawConfigRecord(value)?.chatgptDesktop;
   if (chatgptDesktop !== undefined && !chatgptDesktopSchema.safeParse(chatgptDesktop).success) {
@@ -729,7 +747,11 @@ export function validateConfigCandidate(value: unknown): { ok: true; config: Ocx
   const anthropicError = anthropicOAuthInstanceConfigError(value) ?? anthropicAccountPoolConfigError(value) ?? anthropicSidecarConfigError(value);
   if (anthropicError) return { ok: false, error: anthropicError };
   const boundaryError = blockedModelRedirectsError(value)
+    // OCX-11: the read schema degrades a malformed fallback leaf to absent, which would silently
+    // drop a refusal on the next whole-config save; the write boundary rejects it instead.
+    ?? fallbackPolicyError(value)
     ?? nativeReasoningRetentionConfigError(value)
+    ?? workflowBudgetConfigError(value)
     ?? mainAccountHardLockFallbackError(value)
     ?? compactionRecoveryConfigError(value) ?? desktopCompatibilityConfigError(value) ?? configReasoningPinsConfigError(value)
     ?? blankHostnameError(value)
@@ -765,6 +787,7 @@ export function validateConfigCandidate(value: unknown): { ok: true; config: Ocx
     ?? managementIngressConfigError(value)
     ?? metricsExportConfigError(value)
     ?? serviceHealthRecoveryConfigError(value)
+    ?? telemetryConfigError(value)
     ?? skillsConfigError(value);
   if (boundaryError) return { ok: false, error: boundaryError };
   const result = configSchema.safeParse(value);
@@ -775,20 +798,24 @@ export function validateConfigCandidate(value: unknown): { ok: true; config: Ocx
   return { ok: false, error: schemaDiagnosticsError(result.error) };
 }
 
-export function configDiagnosticsFromRaw(raw: string): ConfigDiagnostics {
+export function configDiagnosticsFromRaw(raw: string, options: { warn?: (message: string) => void } = {}): ConfigDiagnostics {
+  return configDiagnosticsFromText(raw, undefined, options.warn);
+}
+
+function configDiagnosticsFromText(raw: string, file?: { path: string; bytes: Uint8Array }, warn?: (message: string) => void): ConfigDiagnostics {
   try {
     const parsed = JSON.parse(raw.replace(/^\uFEFF/, ""));
-    sanitizeRemovedOpenCodeFreeForLoad(parsed);
+    projectRemovedOpenCodeFreeSnapshot(parsed, file);
     sanitizeOpenCodeOverridesForLoad(parsed);
-    sanitizeReasoningPinsForLoad(parsed);
+    sanitizeReasoningPinsForLoad(parsed, warn);
     // Same degradation as loadConfig: a hand-edited invalid retryOn429 must not trip the
     // schema and send the caller a default-config fallback (the config command could then
     // persist that fallback over the user's providers/keys).
-    sanitizeModelDisplayNamesForLoad(parsed);
-    sanitizeAutoReviewForLoad(parsed);
-    sanitizeRetryOn429ForLoad(parsed);
-    sanitizeModelCostsForLoad(parsed);
-    sanitizeCapabilityDeclarationsForLoad(parsed);
+    sanitizeModelDisplayNamesForLoad(parsed, warn);
+    sanitizeAutoReviewForLoad(parsed, warn);
+    sanitizeRetryOn429ForLoad(parsed, warn);
+    sanitizeModelCostsForLoad(parsed, warn);
+    sanitizeCapabilityDeclarationsForLoad(parsed, warn);
     const result = configSchema.safeParse(parsed);
     if (result.success) {
       return validFileConfigDiagnostics(normalizeApiKeyIds(result.data as OcxConfig), parsed);
@@ -830,10 +857,12 @@ export function configDiagnosticsFromRaw(raw: string): ConfigDiagnostics {
   }
 }
 
-export function readConfigFileSnapshot(): ConfigFileSnapshot {
+export function readConfigFileSnapshot(options: { passive?: boolean } = {}): ConfigFileSnapshot {
   try {
-    const raw = readFileSync(getConfigPath(), "utf-8");
-    return { diagnostics: configDiagnosticsFromRaw(raw), raw };
+    const path = getConfigPath();
+    const bytes = readFileSync(path);
+    const raw = bytes.toString("utf-8");
+    return { diagnostics: configDiagnosticsFromText(raw, options.passive ? undefined : { path, bytes }), raw };
   } catch (error) {
     if (isMissingPathError(error)) {
       return {
@@ -846,8 +875,9 @@ export function readConfigFileSnapshot(): ConfigFileSnapshot {
   }
 }
 
-export function readConfigDiagnostics(): ConfigDiagnostics {
-  return readConfigFileSnapshot().diagnostics;
+/** Passive observations project retired providers without publishing recovery backups. */
+export function readConfigDiagnostics(options: { passive?: boolean } = {}): ConfigDiagnostics {
+  return readConfigFileSnapshot(options).diagnostics;
 }
 
 /** Read-only init preflight. Occupied unsafe entries are never treated as absence. */
@@ -885,12 +915,13 @@ export type ConfigAdmissionSnapshot =
   | Readonly<{ kind: "unreadable"; diagnostics: ConfigDiagnostics; contentSha256: null }>;
 
 export function readConfigAdmissionSnapshot(): ConfigAdmissionSnapshot {
+  const path = getConfigPath();
   let bytes: Buffer;
   try {
     // ONE read. Hashing the file and then reading it again to parse would leave
     // a window for the two to disagree, which is the exact hazard this exists
     // to detect — the check would become a second chance to be wrong.
-    bytes = readFileSync(getConfigPath());
+    bytes = readFileSync(path);
   } catch (error) {
     return {
       kind: "unreadable",
@@ -903,7 +934,7 @@ export function readConfigAdmissionSnapshot(): ConfigAdmissionSnapshot {
   return {
     kind: "read",
     // Decoded from the same buffer that was hashed, not re-read from disk.
-    diagnostics: configDiagnosticsFromRaw(bytes.toString("utf-8")),
+    diagnostics: configDiagnosticsFromText(bytes.toString("utf-8"), { path, bytes }),
     contentSha256: createHash("sha256").update(bytes).digest("hex"),
   };
 }

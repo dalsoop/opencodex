@@ -255,11 +255,14 @@ describe("vertex retry fetch", () => {
       value: () => neverSettles,
     });
     const mock = mockFetch([first, new Response("ok", { status: 200 })]);
+    // Retry-After is a floor over the jittered backoff (#7802), so stub the backoff sleep: the
+    // race below measures only whether the resend waits on the discarded body's cancellation.
+    const waits = spyOn(retry, "sleepWithAbort").mockImplementation(async () => {});
 
     const res = await Promise.race([
       fetchVertexWithRetry(request, { timeoutMs: 5_000 }),
       Bun.sleep(250).then(() => { throw new Error("retry waited for response body cancellation"); }),
-    ]);
+    ]).finally(() => waits.mockRestore());
 
     expect(res.status).toBe(200);
     expect(await res.text()).toBe("ok");
@@ -328,6 +331,31 @@ describe("vertex retry fetch", () => {
       type: "object",
       properties: {},
     });
+  });
+
+  test("a repaired Vertex replay follows a later credential rebuild on transient retry", async () => {
+    const original: AdapterRequest = { ...request, headers: { authorization: "Bearer old" }, body: JSON.stringify({
+      contents: [{ role: "user", parts: [{ text: "hi" }] }],
+      tools: [{ functionDeclarations: [{ name: "fixture", parameters: { type: "object", properties: { ids: { type: "array", items: { type: "string" } } } } }] }],
+    }) };
+    const calls: Array<{ url: string; authorization: string | null; body: string }> = [];
+    const sleep = spyOn(retry, "sleepWithAbort").mockImplementation(async () => {});
+    const executor = (async (input, init) => {
+      calls.push({ url: String(input), authorization: new Headers(init?.headers).get("authorization"), body: String(init?.body) });
+      if (calls.length === 1) return new Response(vertexError(400, "INVALID_ARGUMENT", "tools.0.custom.input_schema: JSON schema is invalid"), { status: 400 });
+      if (calls.length === 2) {
+        original.url = "https://aiplatform.googleapis.com/v1/new";
+        original.headers = { authorization: "Bearer new" };
+        return new Response("retry", { status: 503 });
+      }
+      return new Response("ok");
+    }) as typeof fetch;
+    try {
+      expect((await fetchVertexWithRetry(original, { executor, timeoutMs: 5_000 })).status).toBe(200);
+      expect(calls).toHaveLength(3);
+      expect(calls[2]).toMatchObject({ url: "https://aiplatform.googleapis.com/v1/new", authorization: "Bearer new" });
+      expect(calls[2]!.body).toBe(calls[1]!.body);
+    } finally { sleep.mockRestore(); }
   });
 
   test("raw mode preserves final error body and headers without normalization", async () => {
@@ -520,3 +548,62 @@ describe("adapter fetchResponse wiring", () => {
     }
   });
 });
+
+describe("Google Retry-After is a lower bound (#7802)", () => {
+  const wrappers = [
+    ["Vertex", fetchVertexWithRetry],
+    ["Antigravity", fetchAntigravityWithRetry],
+    ["Gemini direct", fetchDirectGeminiWithRetry],
+  ] as const;
+  const transient = (status: 429 | 503, retryAfter: string) => new Response(
+    vertexError(status, status === 429 ? "RESOURCE_EXHAUSTED" : "UNAVAILABLE", "rate limit, try again"),
+    { status, headers: { "Retry-After": retryAfter } },
+  );
+
+  for (const [name, fetchResponse] of wrappers) {
+    for (const status of [429, 503] as const) test(`${name} waits the full instructed delay before resending (${status})`, async () => {
+      const fixture = mockFetch([transient(status, "30"), new Response("ok", { status: 200 })]);
+      const waits: number[] = [];
+      const sleep = spyOn(retry, "sleepWithAbort").mockImplementation(async ms => { waits.push(ms); });
+      try {
+        const res = await fetchResponse(request, { timeoutMs: 5_000 });
+        expect(res.status).toBe(200);
+        expect(fixture.calls).toHaveLength(2);
+        expect(waits).toHaveLength(1);
+        expect(waits[0]).toBeGreaterThanOrEqual(30_000);
+      } finally { sleep.mockRestore(); }
+    });
+
+    test(`${name} honours an HTTP-date Retry-After as the same floor`, async () => {
+      const at = new Date(Date.now() + 45_000).toUTCString();
+      const fixture = mockFetch([transient(503, at), new Response("ok", { status: 200 })]);
+      const waits: number[] = [];
+      const sleep = spyOn(retry, "sleepWithAbort").mockImplementation(async ms => { waits.push(ms); });
+      try {
+        expect((await fetchResponse(request, { timeoutMs: 5_000 })).status).toBe(200);
+        expect(fixture.calls).toHaveLength(2);
+        expect(waits).toHaveLength(1);
+        expect(waits[0]).toBeGreaterThanOrEqual(43_000);
+        expect(waits[0]).toBeLessThanOrEqual(retry.RETRY_AFTER_CEILING_MS);
+      } finally { sleep.mockRestore(); }
+    });
+
+    for (const status of [429, 503] as const) test(`${name} ends with the upstream answer when the instruction outlives the wait deadline (${status})`, async () => {
+      const first = transient(status, "120");
+      const fixture = mockFetch([first, new Response("unexpected early resend", { status: 200 })]);
+      const sleep = spyOn(retry, "sleepWithAbort").mockImplementation(async () => {});
+      try {
+        const res = await fetchResponse(request, { timeoutMs: 5_000 });
+        expect(res.status).toBe(status);
+        expect(fixture.calls).toHaveLength(1);
+        expect(sleep).not.toHaveBeenCalled();
+        if (name === "Gemini direct") {
+          expect(res).toBe(first);
+          expect(res.headers.get("retry-after")).toBe("120");
+          expect(await res.text()).toContain("rate limit, try again");
+        }
+      } finally { sleep.mockRestore(); }
+    });
+  }
+});
+

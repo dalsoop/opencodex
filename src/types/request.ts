@@ -67,6 +67,8 @@ export interface OcxParsedRequest {
   stream: boolean;
   options: OcxRequestOptions;
   _rawBody?: unknown;
+  /** Trusted ingress provenance: preserve Chat's tool defaults only on the final Responses wire. */
+  _chatCompletionsInput?: boolean;
   /** Claude replay tags, retained only until each route binding verifies them. */
   _nativeReasoningReplay?: ReadonlyMap<string, string>;
   _nativeReasoningBoundOwner?: NativeReasoningOwner;
@@ -77,10 +79,20 @@ export interface OcxParsedRequest {
    */
   _anthropicServerTools?: readonly Record<string, unknown>[];
   /**
+   * Routed Anthropic compaction summary: build tools and system exactly as the ordinary request
+   * would (prompt-cache prefix), then send tool_choice none so no client or hosted tool runs.
+   */
+  _summaryProhibitsToolCalls?: boolean;
+  /**
    * Completed server-tool exchanges from the Claude client's history, keyed by the block that
    * followed them (`call:<tool_use id>` / `text:<text>`). Same audience as `_anthropicServerTools`.
    */
   _anthropicServerReplay?: ReadonlyMap<string, readonly Record<string, unknown>[]>;
+  /**
+   * The caller's `instructions` prefix through its last cache-marked system block. The anthropic
+   * adapter ends a system block there so the breakpoint stays off the per-turn tail.
+   */
+  _anthropicSystemCachePrefix?: string;
   /**
    * Boundary between replayed history and this turn's newly appended input. Usually the
    * items the proxy restored from local previous_response_id state; also set when the
@@ -148,6 +160,7 @@ export interface OcxParsedRequest {
   _kiroAuthContext?: Pick<KiroOAuthMetadata, "profileArn" | "apiRegion" | "ssoRegion" | "authType">;
   /** Account-scoped Zed user identity paired with the long-lived access token. */
   _zedAuthContext?: { userId: string };
+  _workbuddyAuthContext?: import("../oauth/types").WorkBuddyOAuthMetadata;
   /** Provider-private continuation metadata resolved from the Responses previous_response_id chain. */
   _providerContinuation?: OcxProviderContinuationState;
   /** Persisted continuation considered only after the final physical route is known. */
@@ -174,6 +187,13 @@ export interface OcxParsedRequest {
    * answer/"Sources:" text can't bleed into and corrupt the model's schema-constrained output.
    */
   _structuredOutput?: boolean;
+  /**
+   * True for a Claude Messages `output_config.format` json_schema. Anthropic promises an answer
+   * that conforms to that schema, whatever `strict` the Responses translation states for
+   * OpenAI-compatible destinations, so an emulating adapter (Kiro) holds it to full conformance.
+   * Process-local; never forwarded.
+   */
+  _structuredOutputConformance?: boolean;
   /**
    * True when the input carried `{type:"compaction_trigger"}` — Codex remote compaction v2 asking
    * this turn to produce a `{type:"compaction"}` output item. Routed adapters can't natively;
@@ -322,8 +342,23 @@ export interface OcxDocumentContent {
   filename?: string;
 }
 
+/**
+ * Inline audio carried by Codex's Responses input. Chat Completions accepts this as an
+ * `input_audio` content part only for WAV and MP3 payloads, so the normalized form keeps the
+ * base64 bytes and a wire-safe format label rather than the original data URL.
+ */
+export interface OcxAudioContent {
+  type: "audio";
+  /** Base64 payload with no `data:` prefix. */
+  data: string;
+  /** Chat Completions input_audio supports WAV and MP3. */
+  format: "mp3" | "wav";
+  /** Text marker for wires that cannot carry the bytes. */
+  text: string;
+}
+
 /** A user/developer message content part: text, native media, or an attached document. */
-export type OcxContentPart = OcxTextContent | OcxImageContent | OcxVideoContent | OcxDocumentContent;
+export type OcxContentPart = OcxTextContent | OcxImageContent | OcxVideoContent | OcxDocumentContent | OcxAudioContent;
 
 export interface OcxThinkingContent {
   type: "thinking";
@@ -371,6 +406,11 @@ export interface OcxRequestOptions {
   toolChoice?: OcxToolChoice;
   parallelToolCalls?: boolean;
   reasoning?: string;
+  /**
+   * Independent reasoning toggle resolved at client-compatibility ingress. This is distinct from
+   * the strength-like `reasoning` effort: toggle-only models consume this value as `thinking.type`.
+   */
+  thinkingEnabled?: boolean;
   hideThinkingSummary?: boolean;
   /** Provider policy: suppress raw content-channel reasoning while summaries stay visible. */
   hideRawReasoning?: boolean;
@@ -388,7 +428,7 @@ export interface OcxRequestOptions {
    * upstream wire has an equivalent. The openai-chat adapter re-nests it as chat
    * `response_format`, the exact inverse of responseFormatToText in src/chat/inbound.ts.
    * The native passthrough ignores it (it forwards `_rawBody.text` verbatim) and Kiro
-   * keeps rejecting structured output via `_structuredOutput`.
+   * emulates it through a private structured-output tool (src/adapters/kiro/structured-output.ts).
    */
   textFormat?: {
     type: "json_schema" | "json_object";
@@ -444,7 +484,8 @@ export type AdapterEvent =
   | { type: "thinking_delta"; thinking: string }
   // Anthropic extended-thinking round-trip: signature_delta for the current thinking block, and
   // opaque redacted_thinking blocks. Both must be replayed verbatim or tool-use turns 400.
-  | { type: "thinking_signature"; signature: string }
+  // afterOutput marks a turn-level attestation emitted after text/tools, not a new thinking block.
+  | { type: "thinking_signature"; signature: string; afterOutput?: true }
   | { type: "redacted_thinking"; data: string }
   // Kiro reasoning round-trip: the encrypted reasoning blob for the CURRENT assistant turn, tagged
   // with the wire field it arrived on. Never rendered — it only rides the reasoning item's envelope
@@ -453,7 +494,7 @@ export type AdapterEvent =
   | { type: "reasoning_raw_delta"; text: string }
   | { type: "tool_call_start"; id: string; name: string; providerMetadata?: OcxProviderOpaqueToolCallMetadata }
   | { type: "tool_call_delta"; arguments: string }
-  | { type: "tool_call_end" }
+  | { type: "tool_call_end"; incomplete?: true }
   /** Internal boundary between a guarded first pass and its one-shot continuation. */
   | { type: "assistant_boundary" }
   // Native web-search activity surfaced by the web-search sidecar so Codex renders a "Searched the
@@ -547,6 +588,13 @@ export interface OcxUsage {
   cacheCreation1hInputTokens?: number;
   reasoningOutputTokens?: number;
   estimated?: boolean;
+  /**
+   * The adapter read these counts off the upstream's own usage frame. Only an adapter whose
+   * provider is estimated by default (usageForFinalLog) sets it, and a merge keeps it only when
+   * every leg had it. A figure taken off a bridged wire or guessed never carries it, so the
+   * provider default still marks those as estimated.
+   */
+  upstreamReported?: true;
   /**
    * The raw upstream usage object for Responses-shaped upstreams (openai/codex#41980 parity):
    * codex-rs preserves the complete `response.usage` object through its own pipeline, so fields

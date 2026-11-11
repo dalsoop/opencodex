@@ -27,6 +27,11 @@ If the file cannot be parsed, opencodex backs it up as
 `config.json.invalid-<timestamp>`, warns on the console, and starts with defaults. A missing file also
 uses the fresh-install default: one `openai` forward provider.
 
+Local `ocx config set`, `unset`, `import`, offline `ocx effort`, custom-model add/remove, and
+provider add/remove/set-default refuse an invalid or unreadable existing `config.json` without
+changing its bytes. Run `ocx config validate` and repair the file before retrying. Import also
+requires a readable, valid target when a config already exists.
+
 ## Precedence and defaults
 
 ### Provider and model aliases
@@ -127,6 +132,9 @@ opencodex writes managed `config.toml` and `opencodex-catalog.json` files throug
 followed by rename (`atomicWriteFile`).
 This prevents partial files when concurrent writers, such as `ocx stop` and the proxy shutdown handler,
 restore Codex at the same time.
+On Windows, if `opencodex-catalog.json` carries the read-only attribute and blocks the rename, opencodex
+clears the attribute and retries once; a write that still fails reports `Codex catalog is read-only: <path>`
+instead of a bare `EPERM`.
 If a managed TOML file contains an integer outside JavaScript's safe range, the rewrite is refused
 instead of rounding the value, and the file is left unchanged.
 :::

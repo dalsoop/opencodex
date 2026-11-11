@@ -19,6 +19,11 @@ opencodex は、永続的な設定を `$OPENCODEX_HOME/config.json` (通常は `
 
 ファイルを解析できない場合、opencodex はファイルを `config.json.invalid-<timestamp>` としてバックアップし、コンソールに警告を表示し、デフォルトで起動します。欠落しているファイルでも、新規インストールのデフォルトである 1 つの `openai` フォワード プロバイダーが使用されます。
 
+ローカルの `ocx config set`、`unset`、`import`、オフラインの `ocx effort`、カスタムモデルの add/remove、
+プロバイダーの add/remove/set-default は、既存の `config.json` が無効または読み取り不能な場合、
+元のバイト列を変更せずに拒否します。`ocx config validate` を実行し、ファイルを修復してから再試行してください。
+既存の設定がある場合、import にも読み取り可能で有効な保存先ファイルが必要です。
+
 ## 優先順位とデフォルト
 
 `config.json` の有効な値は、組み込みのデフォルトをオーバーライドします。省略可能なフィールドが欠落している場合は、ドメイン ページに記載されているデフォルトが使用されます。 `OPENCODEX_HOME` は、デフォルトの構成ディレクトリよりも優先されます。 `apiKey: "${PROVIDER_API_KEY}"` などの環境参照を受け入れるフィールドは、リクエスト時にその変数を解決します。送信プロキシの場合、すでに設定されている `HTTP_PROXY` または `HTTPS_PROXY` が最上位の `proxy` フィールドよりも優先されます。
@@ -41,5 +46,5 @@ opencodex は、永続的な設定を `$OPENCODEX_HOME/config.json` (通常は `
 API キーには `${ENV_VAR}` 参照を優先します。リテラルの `apiKey`、`apiKeyPool[].key`、および `apiKeys[].key` 値は秘密です。コミットしたり、ログに貼り付けたり、共有したりしないでください。 OAuth およびフォワード プロバイダー トークンは、`config.json` ではなく別の資格情報ストアに保存されます。アカウント ID と電子メールも非公開にしておく必要があります。サポートされている場合は、パブリック セレクター エイリアスを使用します。
 
 :::note[アトミック書き込み]
-opencodex は、一時ファイルを介して管理対象の `config.toml` および `opencodex-catalog.json` ファイルを書き込み、その後名前を変更します (`atomicWriteFile`)。これにより、`ocx stop` やプロキシ シャットダウン ハンドラーなどの同時ライターが Codex を同時に復元するときに、部分的なファイルが生成されるのを防ぎます。
+opencodex は、一時ファイルを介して管理対象の `config.toml` および `opencodex-catalog.json` ファイルを書き込み、その後名前を変更します (`atomicWriteFile`)。これにより、`ocx stop` やプロキシ シャットダウン ハンドラーなどの同時ライターが Codex を同時に復元するときに、部分的なファイルが生成されるのを防ぎます。Windows では、`opencodex-catalog.json` に読み取り専用属性が付いて名前変更が拒否された場合、opencodex が属性を解除して一度だけ再試行します。それでも失敗する場合は、生の `EPERM` ではなく `Codex catalog is read-only: <path>` を報告します。
 :::

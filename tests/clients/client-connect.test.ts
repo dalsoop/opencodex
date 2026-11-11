@@ -60,8 +60,22 @@ const CLIENT_LIFECYCLE_FIXTURE_IMPORT_PROLOGUE =
 const CLIENT_FIXTURE_FAILURE_CATEGORIES = ["module_load", "config_setup", "desktop_setup", "scenario", "child_failed"] as const;
 type ClientFixtureFailureCategory = typeof CLIENT_FIXTURE_FAILURE_CATEGORIES[number];
 
-const TRANSACTION_PHASES = ["module_load", "module_ready", "connect_entered", "connect_resolved", "connect_rejected", "state_read", "result_published"] as const;
+const TRANSACTION_PHASES = [
+  "module_load", "module_ready", "connect_entered", "connect_resolved", "connect_rejected",
+  "operation_entered", "operation_settled", "state_read", "result_published",
+] as const;
 type TransactionProgress = { phase: typeof TRANSACTION_PHASES[number]; elapsedMs: number };
+
+/**
+ * Child-side half of transactionProgress: each --eval child writes its milestones to stderr
+ * synchronously, so a deadline SIGKILL cannot drop the last one it reached.
+ */
+const CHILD_MILESTONE_PROLOGUE = `
+  const transactionStarted = Date.now();
+  const markTransaction = phase => require("node:fs").writeSync(2, JSON.stringify({
+    clientTransactionPhase: phase, elapsedMs: Math.max(0, Date.now() - transactionStarted),
+  }) + "\\n");
+`;
 
 /** Only this fixed diagnostic envelope may reach a parent-side failure message. */
 function transactionProgress(stderr: unknown): TransactionProgress | undefined {
@@ -82,6 +96,17 @@ function transactionProgress(stderr: unknown): TransactionProgress | undefined {
   return undefined;
 }
 
+/** The last lifecycle-fixture phase the child reached, so a deadline kill still names where it stopped. */
+function lastFixturePhase(stderr: unknown): ClientFixtureFailureCategory | undefined {
+  if (typeof stderr !== "string") return undefined;
+  for (const line of stderr.slice(-8192).split("\n").reverse()) {
+    const reached = /^\{"clientFixturePhase":"([a-z_]+)"\}$/.exec(line.trim())?.[1];
+    const phase = CLIENT_FIXTURE_FAILURE_CATEGORIES.find(value => value === reached);
+    if (phase) return phase;
+  }
+  return undefined;
+}
+
 class ClientStateProbeError extends Error {
   constructor(
     readonly pid: number,
@@ -95,6 +120,32 @@ class ClientStateProbeError extends Error {
     super(`Client state probe ${timedOut ? "timed out" : "failed"} (status=${status}, signal=${signal}${failureCategory ? `, category=${failureCategory}` : ""}${progress ? `, phase=${progress.phase}, elapsedMs=${progress.elapsedMs}` : ""})`);
     this.name = "ClientStateProbeError";
   }
+}
+
+/**
+ * Run one repository --eval child under a finite deadline and parse its last stdout line.
+ *
+ * spawnSync blocks this worker, so Bun's per-test timeout cannot end a wedged child: a call
+ * without `timeout` turns one stalled child into a file that never finishes (#7404).
+ * Every synchronous child in this file goes through here; the only child text that may reach a
+ * failure message is the allowlisted milestone read by transactionProgress.
+ */
+function runEvalChild(script: string, env: NodeJS.ProcessEnv, timeoutMs = INTERNAL_DEADLINE_MS) {
+  const result = spawnSync(process.execPath, ["--eval", script], {
+    cwd: repoRoot,
+    env,
+    encoding: "utf8",
+    timeout: timeoutMs,
+    killSignal: "SIGKILL",
+  });
+  const progress = transactionProgress(result.stderr);
+  if (result.error || result.status !== 0 || result.signal !== null) {
+    throw new ClientStateProbeError(result.pid, result.status, result.signal, (result.error as NodeJS.ErrnoException | undefined)?.code === "ETIMEDOUT", undefined, progress);
+  }
+  let parsed: Record<string, any>;
+  try { parsed = JSON.parse(result.stdout.trim().split("\n").at(-1) ?? "{}"); }
+  catch { throw new ClientStateProbeError(result.pid, result.status, result.signal, false, undefined, progress); }
+  return { status: result.status, stderr: result.stderr, parsed };
 }
 
 async function readStateProbe(script: string, home: string, timeoutMs = INTERNAL_DEADLINE_MS) {
@@ -421,10 +472,7 @@ function runTransactionScenario(
   }
   const script = options.script ?? `
     const { existsSync, readFileSync, writeSync } = require("node:fs");
-    const transactionStarted = Date.now();
-    const markTransaction = phase => writeSync(2, JSON.stringify({
-      clientTransactionPhase: phase, elapsedMs: Math.max(0, Date.now() - transactionStarted),
-    }) + "\\n");
+    ${CHILD_MILESTONE_PROLOGUE}
     markTransaction("module_load");
     const { createHash } = require("node:crypto");
     ${CLIENT_TRANSACTION_EVAL_IMPORT_PROLOGUE}
@@ -522,21 +570,10 @@ function runTransactionScenario(
     if (failures.length) throw new AggregateError(failures, "Could not clean client transaction homes");
   };
   try {
-    const result = spawnSync(process.execPath, ["--eval", script], {
-      cwd: repoRoot,
-      env: { ...process.env, OPENCODEX_HOME: opencodexHome, CODEX_HOME: codexHome, OPENCODEX_CLAUDE_DESKTOP_CONFIG_DIR: join(opencodexHome, "desktop") },
-      encoding: "utf8",
-      timeout: options.timeoutMs ?? INTERNAL_DEADLINE_MS,
-      killSignal: "SIGKILL",
-    });
-    const progress = transactionProgress(result.stderr);
-    if (result.error || result.status !== 0 || result.signal !== null) {
-      throw new ClientStateProbeError(result.pid, result.status, result.signal, (result.error as NodeJS.ErrnoException | undefined)?.code === "ETIMEDOUT", undefined, progress);
-    }
-    let parsed: Record<string, any>;
-    try { parsed = JSON.parse(result.stdout.trim().split("\n").at(-1) ?? "{}"); }
-    catch { throw new ClientStateProbeError(result.pid, result.status, result.signal, false, undefined, progress); }
-    return { status: result.status, stderr: result.stderr, parsed, configBytes: readFileSync(configPath, "utf8"), cleanup };
+    const result = runEvalChild(script, {
+      ...process.env, OPENCODEX_HOME: opencodexHome, CODEX_HOME: codexHome, OPENCODEX_CLAUDE_DESKTOP_CONFIG_DIR: join(opencodexHome, "desktop"),
+    }, options.timeoutMs);
+    return { ...result, configBytes: readFileSync(configPath, "utf8"), cleanup };
   } catch (error) {
     try { cleanup(); }
     catch (cleanupError) { throw new AggregateError([error, cleanupError], "Client transaction failed and fixture cleanup failed"); }
@@ -577,7 +614,8 @@ describe("connect transaction and offline disconnect", () => {
   test("transaction fixture stops a child retained after valid output", async () => {
     const proofHome = mkdtempSync(join(tmpdir(), "ocx-transaction-child-proof-"));
     const markerPath = join(proofHome, "child-started.json");
-    const naturalExitPath = join(proofHome, "natural-exit");
+    // The child never exits on its own, so only the deadline kill can end it. A natural-exit
+    // timer here would race that kill on wall-clock time under load.
     const script = `
       const fs = require("node:fs");
       fs.writeFileSync(${JSON.stringify(markerPath)}, JSON.stringify({
@@ -586,7 +624,7 @@ describe("connect transaction and offline disconnect", () => {
       fs.writeSync(1, '{"ok":true}\\n');
       fs.writeSync(2, '{"clientTransactionPhase":"result_published","elapsedMs":1}\\n');
       fs.writeSync(2, '{"clientTransactionPhase":"private-child-secret","elapsedMs":2}\\n');
-      setTimeout(() => { fs.writeFileSync(${JSON.stringify(naturalExitPath)}, "exited"); }, 5_000);
+      setInterval(() => {}, 1_000);
     `;
     let run: Awaited<ReturnType<typeof runTransactionScenario>> | undefined;
     try {
@@ -600,7 +638,6 @@ describe("connect transaction and offline disconnect", () => {
       expect(failure.timedOut).toBe(true);
       expect(failure.progress).toEqual({ phase: "result_published", elapsedMs: 1 });
       expect(failure.message).not.toContain("private-child-secret");
-      expect(existsSync(naturalExitPath)).toBe(false);
       const proof = JSON.parse(readFileSync(markerPath, "utf8")) as { pid: number; home: string; codexHome: string };
       expect(proof.pid).toBe(failure.pid);
       expect(existsSync(proof.home)).toBe(false);
@@ -660,7 +697,7 @@ describe("connect transaction and offline disconnect", () => {
       expect(run.parsed.calls).toEqual([]);
       expect(run.parsed.artifacts).toEqual({ token: false, catalog: false, credentialZeroed: true });
     } finally { run.cleanup(); }
-  });
+  }, SPAWN_BUDGET_MS);
   test("commits key id/state last, zeroes authority, and disconnects with the hub offline", () => {
     const run = runTransactionScenario("success");
     try {
@@ -737,7 +774,7 @@ describe("connect transaction and offline disconnect", () => {
         expect(run.configBytes).not.toContain("issued-id");
         expect(`${run.parsed.error} ${run.stderr}`).not.toContain(`ocx_data_${"d".repeat(40)}`);
       } finally { run.cleanup(); }
-    });
+    }, SPAWN_BUDGET_MS);
   }
 });
 
@@ -806,19 +843,25 @@ function runConnectedStateScenario(mode: "sync-401" | "sync-503" | "disconnect-c
   const script = `
     const fs = require("node:fs");
     const path = require("node:path");
+    ${CHILD_MILESTONE_PROLOGUE}
+    markTransaction("module_load");
     const { disconnectClient, syncConnectedClient } = require("./src/client/connect");
     const { readClientConnectionState } = require("./src/client/state");
     const mode = ${JSON.stringify(mode)};
+    markTransaction("module_ready");
     (async () => {
       let result = null;
       let error = null;
       try {
+        markTransaction("operation_entered");
         if (mode === "disconnect-conflict" || mode === "disconnect-process-journal") result = await disconnectClient({}, { lifecycleLockDeps: { lockPath: process.env.OPENCODEX_HOME + "/lifecycle.sqlite" } });
         else result = await syncConnectedClient({}, {
           lifecycleLockDeps: { lockPath: process.env.OPENCODEX_HOME + "/lifecycle.sqlite" },
           fetchImpl: async () => Response.json({ error: "fixture" }, { status: mode === "sync-401" ? 401 : 503 }),
         });
       } catch (cause) { error = cause instanceof Error ? cause.message : String(cause); }
+      markTransaction("operation_settled");
+      markTransaction("state_read");
       console.log(JSON.stringify({
         result,
         error,
@@ -826,22 +869,27 @@ function runConnectedStateScenario(mode: "sync-401" | "sync-503" | "disconnect-c
         tokenExists: fs.existsSync(path.join(process.env.OPENCODEX_HOME, "service-api-token")),
         journalExists: fs.existsSync(path.join(process.env.CODEX_HOME, "opencodex-journal.json")),
       }));
+      markTransaction("result_published");
     })();
   `;
-  const child = spawnSync(process.execPath, ["--eval", script], {
-    cwd: repoRoot,
-    env: { ...process.env, OPENCODEX_HOME: opencodexHome, CODEX_HOME: codexHome, OPENCODEX_CLAUDE_DESKTOP_CONFIG_DIR: join(opencodexHome, "desktop") },
-    encoding: "utf8",
-  });
-  const parsed = JSON.parse(child.stdout.trim().split("\n").at(-1) ?? "{}") as Record<string, any>;
-  return {
-    status: child.status,
-    parsed,
-    cleanup: () => {
-      removeTreeWithRetry(opencodexHome);
-      removeTreeWithRetry(codexHome);
-    },
+  const cleanup = () => {
+    const failures: unknown[] = [];
+    for (const home of [opencodexHome, codexHome]) {
+      try { removeTreeWithRetry(home); }
+      catch (error) { failures.push(error); }
+    }
+    if (failures.length) throw new AggregateError(failures, "Could not clean connected client homes");
   };
+  try {
+    const { status, parsed } = runEvalChild(script, {
+      ...process.env, OPENCODEX_HOME: opencodexHome, CODEX_HOME: codexHome, OPENCODEX_CLAUDE_DESKTOP_CONFIG_DIR: join(opencodexHome, "desktop"),
+    });
+    return { status, parsed, cleanup };
+  } catch (error) {
+    try { cleanup(); }
+    catch (cleanupError) { throw new AggregateError([error, cleanupError], "Connected client scenario failed and fixture cleanup failed"); }
+    throw error;
+  }
 }
 
 describe("connected sync and disconnect conflicts", () => {
@@ -854,7 +902,7 @@ describe("connected sync and disconnect conflicts", () => {
       expect(run.parsed.state.kind).toBe("connected");
       expect(run.parsed.tokenExists).toBe(true);
     } finally { run.cleanup(); }
-  });
+  }, SPAWN_BUDGET_MS);
 
   test("hub 503 keeps and applies the last-known-good catalog as stale", () => {
     const run = runConnectedStateScenario("sync-503");
@@ -864,7 +912,7 @@ describe("connected sync and disconnect conflicts", () => {
       expect(run.parsed.result).toMatchObject({ stale: true, catalogWritten: false, injected: false });
       expect(run.parsed.state.kind).toBe("connected");
     } finally { run.cleanup(); }
-  });
+  }, SPAWN_BUDGET_MS);
 
   test("journal ownership conflict preserves every artifact and connected state", () => {
     const run = runConnectedStateScenario("disconnect-conflict");
@@ -876,7 +924,7 @@ describe("connected sync and disconnect conflicts", () => {
       expect(run.parsed.tokenExists).toBe(true);
       expect(run.parsed.journalExists).toBe(true);
     } finally { run.cleanup(); }
-  });
+  }, SPAWN_BUDGET_MS);
 
   test("a journal left owned by the proxy process does not strand the connection", () => {
     // Connecting after `ocx start` is the normal path, not an edge case: routing is already
@@ -893,7 +941,7 @@ describe("connected sync and disconnect conflicts", () => {
       expect(run.parsed.state.kind).toBe("disconnected");
       expect(run.parsed.journalExists).toBe(false);
     } finally { run.cleanup(); }
-  });
+  }, SPAWN_BUDGET_MS);
 });
 
 describe("recoverable connected key rotation", () => {
@@ -923,8 +971,11 @@ describe("recoverable connected key rotation", () => {
     const script = `
       const fs = require("node:fs");
       const path = require("node:path");
+      ${CHILD_MILESTONE_PROLOGUE}
+      markTransaction("module_load");
       const { rotateConnectedClientKey } = require("./src/client/connect");
       const { readClientConnectionState } = require("./src/client/state");
+      markTransaction("module_ready");
       let commitCalls = 0;
       let committed = false;
       const oldKey = ${JSON.stringify(oldKey)};
@@ -953,7 +1004,10 @@ describe("recoverable connected key rotation", () => {
       };
       (async () => {
         const credential = new TextEncoder().encode("ocx_admin_rotation_test");
+        markTransaction("operation_entered");
         const result = await rotateConnectedClientKey({ credential: { kind: "admin", value: credential } }, { fetchImpl, lifecycleLockDeps: { lockPath: process.env.OPENCODEX_HOME + "/lifecycle.sqlite" } });
+        markTransaction("operation_settled");
+        markTransaction("state_read");
         console.log(JSON.stringify({
           result,
           state: readClientConnectionState(),
@@ -962,16 +1016,13 @@ describe("recoverable connected key rotation", () => {
           commitCalls,
           credentialZeroed: credential.every(value => value === 0),
         }));
+        markTransaction("result_published");
       })();
     `;
-    const child = spawnSync(process.execPath, ["--eval", script], {
-      cwd: repoRoot,
-      env: { ...process.env, OPENCODEX_HOME: opencodexHome, OPENCODEX_CLAUDE_DESKTOP_CONFIG_DIR: join(opencodexHome, "desktop") },
-      encoding: "utf8",
-    });
     try {
-      expect(child.status).toBe(0);
-      const result = JSON.parse(child.stdout.trim().split("\n").at(-1) ?? "{}") as Record<string, any>;
+      const { parsed: result } = runEvalChild(script, {
+        ...process.env, OPENCODEX_HOME: opencodexHome, OPENCODEX_CLAUDE_DESKTOP_CONFIG_DIR: join(opencodexHome, "desktop"),
+      });
       expect(result.commitCalls).toBe(2);
       expect(result.tokenIsNew).toBe(true);
       expect(result.backup).toBe(false);
@@ -981,7 +1032,7 @@ describe("recoverable connected key rotation", () => {
     } finally {
       removeTreeWithRetry(opencodexHome);
     }
-  });
+  }, SPAWN_BUDGET_MS);
 
   test("status removes a .prev orphan only when no rotation marker exists", async () => {
     const home = mkdtempSync(join(tmpdir(), "ocx-client-orphan-"));
@@ -1055,7 +1106,7 @@ function runDesktopLifecycleScenario(mode: string) {
       catalogFingerprint: crypto.createHash("sha256").update(catalog).digest("base64url"),
       priorCatalog: Buffer.from(prior).toString("base64"),
     } };
-    fixtureFailurePhase = "config_setup";
+    markFixturePhase("config_setup");
     configApi.saveConfig(config);
     if (configApi.readConfigDiagnostics().source !== "file" || stateApi.readClientConnectionState().kind !== "connected") {
       throw new Error("fixture_config_invalid");
@@ -1067,7 +1118,7 @@ function runDesktopLifecycleScenario(mode: string) {
     const profilePath = path.join(desktop, "fixture.json");
     const baselinePath = path.join(home, "desktop-remote", "baseline.json");
     const unused = mode.startsWith("status-") || mode === "disconnect-expected-owner";
-    fixtureFailurePhase = "desktop_setup";
+    markFixturePhase("desktop_setup");
     if (!unused) {
       fs.writeFileSync(path.join(desktop, "_meta.json"), JSON.stringify({ appliedId: "fixture", entries: [{ id: "fixture", name: "opencodex" }], foreignMeta: "preserve" }));
       fs.writeFileSync(profilePath, JSON.stringify({
@@ -1135,11 +1186,13 @@ function runDesktopLifecycleScenario(mode: string) {
       }
       throw new Error("unexpected fixture request");
     };
-    fixtureFailurePhase = "scenario";
+    markFixturePhase("scenario");
     await (async () => {
       let result = null, error = null, second = null, statusInside = null, statusOutside = null, cliRotation = null;
       const credential = new TextEncoder().encode("ocx_admin_fixture");
-      const deps = { fetchImpl, lifecycleLockDeps: lockDeps };
+      // No local Codex runtime, as on CI: otherwise sync execs whatever codex CLI the host has
+      // (seconds on a workstation) to read its effort ladder, which no case here asserts on.
+      const deps = { fetchImpl, lifecycleLockDeps: lockDeps, catalogCompatibility: { supportedEfforts: () => null } };
       try {
         if (mode.startsWith("disconnect")) {
           let journalSpy;
@@ -1254,7 +1307,13 @@ function runDesktopLifecycleScenario(mode: string) {
   const fixturePath = join(root, "client-lifecycle-fixture.test.ts");
   writeFileSync(fixturePath, `import { test } from "bun:test";
     test("isolated client lifecycle scenario", async () => {
-      let fixtureFailurePhase = "module_load";
+      // Written synchronously to stderr so a deadline SIGKILL still leaves the phase it stopped in.
+      let fixtureFailurePhase;
+      const markFixturePhase = phase => {
+        fixtureFailurePhase = phase;
+        require("node:fs").writeSync(2, JSON.stringify({ clientFixturePhase: phase }) + "\\n");
+      };
+      markFixturePhase("module_load");
       try {
         ${resolvedScript}
       } catch {
@@ -1276,7 +1335,8 @@ function runDesktopLifecycleScenario(mode: string) {
     let envelope: { fixtureFailure?: unknown; fixtureResult?: unknown } | undefined;
     try { if (marker) envelope = JSON.parse(marker); } catch { /* fixed category below */ }
     if (child.error || child.status !== 0 || child.signal || !envelope?.fixtureResult) {
-      const category = CLIENT_FIXTURE_FAILURE_CATEGORIES.find(value => value === envelope?.fixtureFailure) ?? "child_failed";
+      const category = CLIENT_FIXTURE_FAILURE_CATEGORIES.find(value => value === envelope?.fixtureFailure)
+        ?? lastFixturePhase(child.stderr) ?? "child_failed";
       throw new ClientStateProbeError(child.pid, child.status, child.signal, (child.error as NodeJS.ErrnoException | undefined)?.code === "ETIMEDOUT", category);
     }
     return envelope.fixtureResult as Record<string, any>;
@@ -1284,6 +1344,9 @@ function runDesktopLifecycleScenario(mode: string) {
 }
 
 describe("Desktop copy coherence across client lifecycle", () => {
+  // Each case runs its scenario in a real `bun test` child, bounded by spawnSync at INTERNAL_DEADLINE_MS.
+  // Under Bun's 5 s default the case gave up first: a loaded `test changed` run timed out
+  // `status-receipt` at 5010 ms while its child was still inside its own 15 s deadline (#8041).
   // The first generated lifecycle fixture pays the full client lifecycle module graph load.
   // Warm the same relative require prologue before the fixture's 15-second child deadline.
   beforeAll(async () => {
@@ -1298,7 +1361,7 @@ describe("Desktop copy coherence across client lifecycle", () => {
     expect(r.pending || r.backupPresent || r.persistedOutcome).toBe(false);
     expect(r.foreignPreserved && r.baselineUnchanged && r.credentialZeroed).toBe(true);
     if (r.commits > 0) expect(r.desktopBeforeCommit).toBe(true);
-  });
+  }, SPAWN_BUDGET_MS);
   test.each(["recover-backup", "same-old"])("%s returns rolled_back without a false commit", mode => {
     const r = runDesktopLifecycleScenario(mode);
     expect(r.error).toBeNull();
@@ -1308,28 +1371,28 @@ describe("Desktop copy coherence across client lifecycle", () => {
     expect(r.tokenIsOld && r.desktopIsOld).toBe(true);
     expect(r.pending || r.backupPresent || r.persistedOutcome).toBe(false);
     expect(r.baselineUnchanged && r.credentialZeroed).toBe(true);
-  });
+  }, SPAWN_BUDGET_MS);
   test("normal failed candidate rolls both local copies back before returning failure", () => {
     const r = runDesktopLifecycleScenario("rollback");
     expect(r.error).not.toBeNull();
     expect(r.commits).toBe(0);
     expect(r.tokenIsOld && r.desktopIsOld).toBe(true);
     expect(r.pending || r.backupPresent).toBe(false);
-  });
+  }, SPAWN_BUDGET_MS);
   test.each(["same-old-abort-failure", "recover-neither", "recover-probe-error"])("%s preserves recovery evidence", mode => {
     const r = runDesktopLifecycleScenario(mode);
     expect(r.result).toBeNull();
     expect(r.error).not.toBeNull();
     expect(r.commits).toBe(0);
     expect(r.pending && r.backupPresent && r.credentialZeroed).toBe(true);
-  });
+  }, SPAWN_BUDGET_MS);
   test("CLI reports a recovered rollback honestly", () => {
     const r = runDesktopLifecycleScenario("recover-backup-cli");
     expect(r.cliRotation.exitCode).toBe(0);
     expect(r.cliRotation.value.rotation).toBe("rolled_back");
     expect(r.cliRotation.revokedClaim).toBe(false);
     expect(r.desktopIsOld && r.tokenIsOld).toBe(true);
-  });
+  }, SPAWN_BUDGET_MS);
   test.each(["disconnect", "disconnect-foreign", "disconnect-resume", "disconnect-after-clear"])("%s restores projection and retries idempotently", mode => {
     const r = runDesktopLifecycleScenario(mode);
     expect(r.error).toBeNull();
@@ -1338,26 +1401,26 @@ describe("Desktop copy coherence across client lifecycle", () => {
     expect(r.receiptPhase).toBe("complete");
     expect(r.second.tokenRemoved).toBe(false);
     if (mode === "disconnect-foreign") expect(r.userAddedPreserved).toBe(true);
-  });
+  }, SPAWN_BUDGET_MS);
   test("legacy current-hub profile disconnects via labeled standard fallback", () => {
     const r = runDesktopLifecycleScenario("disconnect-legacy");
     expect(r.error).toBeNull();
     expect(r.result.desktopRestoration).toBe("standard_fallback");
     expect(r.desktopHasKey).toBe(false);
     expect(r.tokenAbsent && r.foreignPreserved).toBe(true);
-  });
+  }, SPAWN_BUDGET_MS);
   test("protected Desktop edits block destructive disconnect", () => {
     const r = runDesktopLifecycleScenario("disconnect-protected");
     expect(r.error).not.toBeNull();
     expect(r.tokenIsOld && r.desktopIsOld).toBe(true);
     expect(r.stateKind).toBe("connected");
-  });
+  }, SPAWN_BUDGET_MS);
   test("post-await sync cannot overwrite a prepared disconnect", () => {
     const r = runDesktopLifecycleScenario("sync-claim");
     expect(r.error).toBe("client_disconnect_pending");
     expect(r.catalogUnchanged).toBe(true);
     expect(r.receiptPhase).toBe("prepared");
-  });
+  }, SPAWN_BUDGET_MS);
   test("disconnect expectedOwner refuses a newly connected owner before claiming or deleting state", () => {
     const r = runDesktopLifecycleScenario("disconnect-expected-owner");
     expect(r.result).toBeNull();
@@ -1365,30 +1428,30 @@ describe("Desktop copy coherence across client lifecycle", () => {
     expect(r.stateKind).toBe("connected");
     expect(r.tokenIsNew && r.catalogUnchanged).toBe(true);
     expect(r.receiptPhase).toBe("absent");
-  });
+  }, SPAWN_BUDGET_MS);
   test("disconnect claims its receipt before Codex-only restoration outside L", () => {
     const r = runDesktopLifecycleScenario("disconnect-order");
     expect(r.error).toBeNull();
     expect(r.codexSawPrepared && r.codexOutsideL).toBe(true);
     expect(r.receiptPhase).toBe("complete");
-  });
+  }, SPAWN_BUDGET_MS);
   test("sync CAS preserves a newer token generation and leaves catalog bytes unchanged", () => {
     const r = runDesktopLifecycleScenario("sync-generation-change");
     expect(r.error).toBe("client_connection_changed");
     expect(r.tokenIsNew && r.catalogUnchanged).toBe(true);
-  });
+  }, SPAWN_BUDGET_MS);
   test("full-owner clear cannot delete a newer connection with the same key id", () => {
     const r = runDesktopLifecycleScenario("clear-owner-change");
     expect(r.result).toBe("conflict");
     expect(r.stateKind).toBe("connected");
     expect(r.tokenIsOld).toBe(true);
-  });
+  }, SPAWN_BUDGET_MS);
   test("sync supplies the read-only guard at the actual injection seam", () => {
     const r = runDesktopLifecycleScenario("sync-queued-guard");
     expect(r.guardSeen).toBe(true);
     expect(r.writesAfterGuard).toBe(0);
     expect(r.error).toBe("client_disconnect_pending");
-  });
+  }, SPAWN_BUDGET_MS);
   test.each(["status-lock", "status-receipt"])("%s cannot discard another operation's backup", mode => {
     const r = runDesktopLifecycleScenario(mode);
     expect(r.error).toBeNull();
@@ -1396,7 +1459,7 @@ describe("Desktop copy coherence across client lifecycle", () => {
     expect(r.statusInside.backupPresent).toBe(true);
     expect(r.statusOutside.kind).toBe(mode === "status-lock" ? "orphan-cleaned" : "recovery-required");
     expect(r.backupPresent).toBe(mode === "status-receipt");
-  });
+  }, SPAWN_BUDGET_MS);
 });
 
 describe("a sibling instance never connects, syncs or disconnects the shared Codex home", () => {

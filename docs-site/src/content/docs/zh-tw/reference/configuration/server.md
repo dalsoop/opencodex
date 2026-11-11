@@ -14,7 +14,7 @@ description: 監聽器、遠端存取、許可金鑰、逾時、儲存、sidecar
 | `proxy?` | `string` | — | 對外 HTTP(S) 或 SOCKS5 代理 URL（`socks5://host:port`）或 `${ENV_VAR}`。HTTP URL 僅在那些變數未設定時套用至 `HTTP_PROXY` / `HTTPS_PROXY`。SOCKS5 URL 使用內建的真實 SOCKS5 通道，也會套用至 `ALL_PROXY`（`ocx start --socks5`），並清除此行程繼承的 `HTTP(S)_PROXY`。回送保留在 `NO_PROXY` 中。 |
 | `emptyCompletionRetry?` | `boolean` | `false` | 明確啟用：當 Responses 完成時沒有文字或工具呼叫，以相同請求重試一次。重試可能產生費用。`OCX_EMPTY_COMPLETION_RETRY=0` 可在不變更設定的情況下停用；combo 與 routed-compaction turn 不適用。 |
 | `stallTimeoutSec?` | `number` | `300`（public）/ 停用（local） | 上游無有效進展（Responses 與原生 Chat）多少秒後切斷串流。未設定時**本地**上游（loopback、private、`.local`/`.lan` 名稱）預設停用，公網上游預設 300 秒；正值對兩者生效（最小 1 秒）；`0` 全面停用靜默 watchdog。對於把 canonical ChatGPT SSE 折疊為非串流 JSON 的 Responses 請求，即使 watchdog 已停用，仍保留獨立的 15 分鐘整體上限。`/v1/responses/compact` 的擱置回應本文讀取共用此預算，但即使本地上游也預設 300 秒；明確值（含 `0`）優先。 |
-| `connectTimeoutMs?` | `number` | `200000` | 每次嘗試的 DNS/TCP/TLS/final-header 截止時間；它在 body 生成前結束。 |
+| `connectTimeoutMs?` | `number` | `200000`（public）/ 停用（local） | 從送出請求到上游傳回首個回應 header 的每次嘗試截止時間（DNS/TCP/TLS 及等待 header）；它在 body 生成前結束，與管理 body 串流的 `stallTimeoutSec` 無關。未設定時**本地**上游（loopback、private、`.local`/`.lan` 名稱）預設停用，公網上游預設 200 秒；正值對兩者生效；`0`（或任何非正值）全面停用該 header 截止時間。停用後，本地模型在大提示上可花費數分鐘進行 prompt prefill，而首個 header 時鐘不會切斷健康的請求。 |
 | `shutdownTimeoutMs?` | `number` | `5000` | 在中止活躍回合前的優雅排空截止時間。 |
 | `websockets?` | `boolean` | `false` | 廣告並允許面向 client 的 Responses WebSocket 路徑。False 時 client 使用 HTTP/SSE；不會停用符合條件的 canonical ChatGPT upstream WS 最佳化。 |
 | `corsAllowOrigins?` | `string[]` | `[]` | 額外的精確 CORS 來源。回送來源恆被允許。 |
@@ -30,6 +30,7 @@ description: 監聽器、遠端存取、許可金鑰、逾時、儲存、sidecar
 | `webSearchSidecar?` | `OcxWebSearchSidecarConfig` | 可用時開啟 | 網頁搜尋 sidecar 選項。 |
 | `visionSidecar?` | `OcxVisionSidecarConfig` | 可用時開啟 | 圖片描述 sidecar 選項。 |
 | `images?` | `OcxImagesConfig` | 自動 OpenAI 選擇 | Codex `image_gen` 的獨立 Images 中繼選項。 |
+| `telemetry?` | `OcxTelemetryConfig` | 人工知悉提示後預設開啟 | 匿名每日使用遙測的同意狀態（`decision`、`decidedAt`、`noticeShownAt`）。在人工看到提示或主動同意之前不會傳送任何資料。可被 `OCX_TELEMETRY=0` 或 `DO_NOT_TRACK=1` 覆寫。請見[遙測（`telemetry`）](#遙測telemetry)與[遙測與隱私](/zh-tw/guides/telemetry/)。 |
 
 若較舊的開發組建在備份支援存在前變更了 resume-history 中繼資料，請執行 `ocx recover-history --legacy-openai --yes` 以強制原生供應商復原。
 此命令會重新標記所有含有使用者訊息的 `opencodex` row，其中也包含正常的專用 provider 歷史；執行前請查看 lifecycle reference 中的完整範圍警告。
@@ -126,6 +127,35 @@ ssh -L 20100:localhost:10100 -L 1455:localhost:1455 you@remote
 :::caution[轉發的回送未認證]
 普通 `ssh -L` 在你的本機回送上監聽，對預設的未認證綁定是安全的。請勿使用 `ssh -g -L`、廣泛的容器發布，或將客戶端暴露在 `0.0.0.0` 上的轉發模式。不確定時請用 `ssh -L 127.0.0.1:20100:localhost:10100` 明確綁定。
 :::
+
+## 遙測（`telemetry`）
+
+匿名每日使用遙測僅在使用者看到告知提示（透過 GUI 彈窗或互動式終端機提示）後才預設開啟。`config.json` 中的 `telemetry` 區塊記錄該同意狀態：
+
+```json
+{
+  "telemetry": {
+    "decision": "accepted",
+    "decidedAt": "2026-11-07T09:00:00.000Z",
+    "noticeShownAt": "2026-11-07T09:00:00.000Z"
+  }
+}
+```
+
+| 欄位 | 型別 | 預設值 | 意義 |
+| --- | --- | --- | --- |
+| `telemetry.decision?` | `"accepted" \| "declined"` | 未設定（未決定） | 使用者的明確選擇。`"declined"` 會停用遙測並立即刪除 `<OPENCODEX_HOME>/telemetry-id.json`；`"accepted"` 會啟用每日報告。 |
+| `telemetry.decidedAt?` | `string` (ISO 8601) | 未設定 | 記錄 `decision` 的 UTC 時間戳記。僅傳送嚴格晚於 `decidedAt ?? noticeShownAt` 所在 UTC 日期的已完成 UTC 日曆日（`day > formatUtcDay(decidedAt ?? noticeShownAt)`）；同意當天及更早的日期絕不會補送。 |
+| `telemetry.noticeShownAt?` | `string` (ISO 8601) | 未設定 | 人類使用者在網頁儀表板或互動式終端機中看到告知提示的 UTC 時間戳記。當 `decision` 未設定時，僅在已設定 `noticeShownAt` 時才會傳送遙測（`default-on`）；否則代理保持在 `awaiting-notice` 狀態。 |
+
+收集器端點（`https://telemetry.opencodex.me/v1/events`）是程式碼常數，無法在 `config.json` 中設定。
+
+兩個環境變數會覆寫 `config.json` 並立即停用遙測，且不會修改已儲存的 `config.json`（在代理啟動或排程器週期偵測到任一變數時，還會在 `<OPENCODEX_HOME>/telemetry-state.json` 中記錄當日 UTC 日期為 `ineligibleThroughDay` 並刪除 `<OPENCODEX_HOME>/telemetry-id.json`，因此移除變數後不會補送這些日期，並會產生新的安裝 ID）：
+
+- `OCX_TELEMETRY=0`（不分大小寫，也接受 `false`、`off` 或 `no`）
+- `DO_NOT_TRACK=1`（不分大小寫，也接受 `true` 或 `yes`）
+
+`ocx config set telemetry` 與 `ocx config unset telemetry` 會被拒絕，且 `ocx config import` 對所有呼叫方都會忽略匯入的 `telemetry` 區塊並保留已持久化的同意狀態；請改用 `ocx telemetry enable`（需要互動式終端機並確認告知提示，否則以 `agent_consent_required` / `tty_required` 結束）、`ocx telemetry disable`、`ocx telemetry status [--json]` 或儀表板 **Proxy details** 中的開關。完整負載結構與保留政策請參閱[遙測與隱私](/zh-tw/guides/telemetry/)。
 
 ## 儲存清理
 
@@ -263,3 +293,11 @@ Claude CLI、CodeBuddy 及 Qoder 將每次 CLI 呼叫計為一次傳送，啟動
 未發布實驗版本的日誌若含 `pool-current` 或 `poolContinuity`，即使後來經過壓縮，仍不屬於契約 C。其原始餘額會作為未知歷史保留至正常到期，不會立即轉換或刪除。
 
 完整但無效的紀錄，包括最後一行的 `null`，會使有額度限制的請求遭拒。壓縮仍可將有效帳務保留在乾淨的檢查點；目前程序的拒絕狀態會持續到重新啟動並讀取乾淨日誌。寫入中斷的最後一行 JSON 沿用原有復原規則。詳細範圍及錯誤碼請見[英文原文](/reference/configuration/server/#historical-pool-continuity)。
+
+## 本機上游逾時分類
+
+此分類只決定逾時政策，不授予網路存取權限。HTTP(S) 目的地依名稱或位址字面值分類，不查詢 DNS：精確的 `localhost`（不分大小寫，允許結尾句點）、`0.0.0.0`、IPv4 loopback（127/8）、RFC 1918 私有位址及 link-local（169.254/16）、IPv6 loopback、link-local（fe80::/10）、unique-local（fc00::/7）、IPv4-mapped 等價位址，以及 `.local`/`.lan` 名稱屬於本機。其他 DNS 名稱即使解析到 loopback，也保留公開上游逾時。無效目的地、不支援的協定及 `localhost.example` 亦保留公開預設值。
+
+關閉回應標頭期限仍保留用戶端取消及外層整體期限。明確的正值 `stallTimeoutSec` 仍限制本機回應本文靜默；本機 header/stall 都未設定時，標頭抵達前沒有自動期限。原生 Chat/Messages 本機 JSON 讀取使用 stall 預算，公開 JSON 讀取保留原有 `max(connectTimeoutMs ?? 200000, 5000)`。Compact 本文即使本機也預設 300 秒。影像/搜尋 sidecar 預算不變。
+
+選用的 `opencodeClientExport` 包含 `headerTimeoutMs`、`chunkTimeoutMs`、`timeoutMs`，接受正毫秒數或表示關閉的 `false`。省略時保留 OpenCode 預設值，無效欄位不匯出。設定在 V1 options 與 V2 settings 中對整個 provider 生效。請參閱[慢速本機模型](/guides/opencode/#slow-local-models-prefill-timeouts)。

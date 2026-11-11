@@ -6,8 +6,9 @@ import { handleLinkRoutes, type LinkRouteState } from "../../src/server/manageme
 import type { ManagementContext } from "../../src/server/management/context";
 import type { OcxConfig } from "../../src/types";
 import type { LinkStore } from "../../src/link/store";
-import { SshRunnerError, type SshRunner, type SshRunResult } from "../../src/link/ssh-runner";
-import { quoteRemote, remoteOcxArgv } from "../../src/link/ssh-argv";
+import { SshRunnerError, SSH_MAX_OUTPUT_BYTES, SSH_OUTPUT_CAP_BYTES, type SshRunner, type SshRunResult } from "../../src/link/ssh-runner";
+import { quoteRemote, remoteOcxArgv, WINDOWS_OS_PROBE } from "../../src/link/ssh-argv";
+import { windowsScriptData } from "../../src/link/remote-windows";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 
 let root: string;
@@ -28,9 +29,8 @@ const recovery = "Run ocx disconnect and ocx restart on the Child before retryin
 const result = (stdout = "", code = 0): SshRunResult => ({ code, stdout, stderr: "" });
 const http = (body: unknown, status = 200) => result(`${JSON.stringify(body)}\n${status}`);
 const health = (role: string, restartCapability: string | null = "v1") => http({ service: "opencodex", pid: 4321, port: 10100, role, ...(restartCapability === null ? {} : { restartCapability }) });
-const ocx = (args: string[]) => quoteRemote(remoteOcxArgv(args));
 type RunOptions = Parameters<SshRunner["run"]>[1];
-type Step = "probe" | "fingerprint" | "version" | "port" | "config" | "curl" | "before" | "connect" | "restart" | "health" | "catalog";
+type Step = "probe" | "uname" | "windows" | "fingerprint" | "version" | "port" | "config" | "validate" | "curl" | "before" | "connect" | "restart" | "health" | "catalog";
 interface Call { step: Step; argv: readonly string[]; options: RunOptions; }
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -38,7 +38,8 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
-function harness() {
+function harness(remotePlatform: "posix" | "windows" = "posix") {
+  const remoteOcx = (args: string[]) => quoteRemote(remoteOcxArgv(args, remotePlatform));
   const config: OcxConfig = { port: 10100, hostname: "127.0.0.1", runtimeRole: "standalone", defaultProvider: "mock", providers: {}, apiKeys: [] };
   const knownHosts = join(root, "known_hosts");
   let store: LinkStore = { version: 1, listenerPort: 18181, links: [] };
@@ -79,16 +80,22 @@ function harness() {
   const runner: SshRunner = {
     async run(argv, options) {
       const command = argv.at(-1) ?? "";
+      const decoded = command.startsWith("powershell.exe ") ? Buffer.from(command.split(" ").at(-1)!, "base64").toString("utf16le") : command;
+      // Decoded with the builder's own reader, so the fixture follows the emitted format.
+      const nativeArgs = command.startsWith("powershell.exe ") ? windowsScriptData(decoded)?.args : undefined;
       const step: Step = argv[0] === "ssh-keygen" ? "fingerprint"
-        : command === "true" ? "probe"
-        : command === ocx(["--version"]) ? "version"
-        : command === ocx(["link", "port"]) ? "port"
-        : command === ocx(["config", "show", "--json"]) ? "config"
+        : command === "echo ocx-link-probe" ? "probe"
+        : command === WINDOWS_OS_PROBE ? "windows"
+        : command.includes("ocx-platform") ? "uname"
+        : command === remoteOcx(["--version"]) ? "version"
+        : command === remoteOcx(["link", "port"]) ? "port"
+        : command === remoteOcx(["config", "show", "--json"]) ? "config"
+        : command === remoteOcx(["config", "validate", "--json"]) ? "validate"
         : command.includes("ocx-curl-preflight") ? "curl"
-        : command.includes("'connect' '--link' '--key-stdin'") ? "connect"
-        : command === ocx(["restart"]) ? "restart"
-        : command.includes("'ocx-child-http' '10100' 'healthz'") ? (restarted ? "health" : "before")
-        : command.includes("'ocx-child-http' '10100' 'v1/catalog'") ? "catalog"
+        : (nativeArgs?.[0] === "connect" || command.includes("'connect' '--link' '--key-stdin'")) ? "connect"
+        : command === remoteOcx(["restart"]) ? "restart"
+        : (decoded.includes("http://127.0.0.1:10100/healthz") || command.includes("'ocx-child-http' '10100' 'healthz'")) ? (restarted ? "health" : "before")
+        : (decoded.includes("http://127.0.0.1:10100/v1/catalog") || command.includes("'ocx-child-http' '10100' 'v1/catalog'")) ? "catalog"
         : (() => { throw new Error(`Unexpected SSH command: ${command}`); })();
       const call = { step, argv, options };
       calls.push(call); events.push(step);
@@ -102,23 +109,33 @@ function harness() {
         // Enrollment itself hits Home's catalog; this is deliberately before the fresh watcher.
         emit("enrollment");
       }
-      if (overrides[step]) return overrides[step]!(call);
-      switch (step) {
-        case "probe": {
-          const path = candidateFile(argv);
-          writeFileSync(path, `${aliasOf(argv)} ssh-ed25519 AAAA\n`);
-          return result();
+      const fixture = (): SshRunResult => {
+        switch (step) {
+          case "probe": {
+            const path = candidateFile(argv);
+            writeFileSync(path, `${aliasOf(argv)} ssh-ed25519 AAAA\n`);
+            return result("ocx-link-probe\n");
+          }
+          case "uname": return result("Linux\n");
+          case "windows": return remotePlatform === "windows" ? result("Windows_NT\r\n") : { code: 127, stdout: "", stderr: "sh: cmd: not found" };
+          case "fingerprint": return result(`256 ${fingerprint} child (ED25519)`);
+          case "version": return result("opencodex 2.83.0\n");
+          case "port": return result('{"port":2200}');
+          case "config": return result('{"port":10100}\n');
+          case "validate": return { code: 1, stdout: "", stderr: "Unknown command: config validate\n" };
+          case "curl": case "connect": return result();
+          case "before": return health("standalone");
+          case "restart": return result();
+          case "health": return health("client");
+          case "catalog": emit("catalog"); return http({ models: [{ id: "fixture-model" }] });
         }
-        case "fingerprint": return result(`256 ${fingerprint} child (ED25519)`);
-        case "version": return result("opencodex 2.83.0\n");
-        case "port": return result('{"port":2200}');
-        case "config": return result('{"port":10100}\n');
-        case "curl": case "connect": return result();
-        case "before": return health("standalone");
-        case "restart": return result();
-        case "health": return health("client");
-        case "catalog": emit("catalog"); return http({ models: [{ id: "fixture-model" }] });
-      }
+      };
+      // Mirror the real runner: a stream over the requested (or default) cap is an output_limit
+      // failure, not a silently truncated result.
+      const produced = overrides[step] ? await overrides[step]!(call) : fixture();
+      const cap = options?.maxOutputBytes ?? SSH_OUTPUT_CAP_BYTES;
+      if (Buffer.byteLength(produced.stdout) > cap) throw new SshRunnerError("output_limit", `ssh output exceeded ${cap} bytes`);
+      return produced;
     },
     spawnTunnel() { throw new Error("The route must use its supplied supervisor"); },
   };
@@ -151,7 +168,7 @@ function harness() {
     return response;
   }
   function seed(alias = "child", latency = 0) {
-    const pending = { alias, fingerprint, keyType: "ED25519", knownHostLine: `${alias} ssh-ed25519 AAAA`, probedAt: clock, sshLatencyMs: latency };
+    const pending = { alias, fingerprint, keyType: "ED25519", knownHostLine: `${alias} ssh-ed25519 AAAA`, probedAt: clock, sshLatencyMs: latency, remotePlatform };
     state.pendingHosts.set(alias, pending); return pending;
   }
   function confirmed(alias = "child", latency = 0) {
@@ -205,7 +222,7 @@ describe("Home enrollment of a standalone Child", () => {
     await catalogStarted.promise;
     try {
       expect(settled).toBe(false); expect(h.callbacks.size).toBe(1);
-      expect(h.calls.map(call => call.step)).toEqual(["probe", "fingerprint", "version", "port", "config", "curl", "before", "connect", "restart", "health", "catalog"]);
+      expect(h.calls.map(call => call.step)).toEqual(["probe", "fingerprint", "windows", "uname", "version", "port", "config", "curl", "before", "connect", "restart", "health", "catalog"]);
       expect(h.admissions).toEqual([{ phase: "enrollment", id: h.enrollmentId }, { phase: "catalog", id: h.enrollmentId }]);
     } finally { completeCatalog.resolve(http({ models: [] })); }
     const response = await applying;
@@ -289,7 +306,7 @@ describe("Home enrollment of a standalone Child", () => {
   test("measured 3400ms SSH latency allows 28600ms commands and separate restart/relay budgets", async () => {
     const h = harness();
     h.overrides.probe = call => {
-      h.advance(3400); writeFileSync(candidateFile(call.argv), "child ssh-ed25519 AAAA\n"); return result();
+      h.advance(3400); writeFileSync(candidateFile(call.argv), "child ssh-ed25519 AAAA\n"); return result("ocx-link-probe\n");
     };
     expect((await h.call("probe", { alias: "child" })).status).toBe(200);
     expect((await h.call("confirm-host", { alias: "child", fingerprint })).status).toBe(200);
@@ -300,6 +317,57 @@ describe("Home enrollment of a standalone Child", () => {
     expect(timeouts.get("restart")).toBe(158_600);
     expect(h.calls.at(-2)?.options?.timeoutMs).toBe(15_000);
     expect(timeouts.get("catalog")).toBe(15_000);
+  });
+
+  test("a Child whose config show exceeds the ordinary SSH output cap still passes preflight", async () => {
+    const h = harness(); h.confirmed();
+    // Reproduces #8356: a Child with a large saved configuration printed far more than the
+    // runner's 64 KiB default, so readOutput threw output_limit before preflight could read port.
+    const padding = "x".repeat(SSH_OUTPUT_CAP_BYTES + 8 * 1024);
+    h.overrides.config = () => result(JSON.stringify({ port: 10100, runtimeRole: "standalone", padding }) + "\n");
+    const response = await h.call("apply", { alias: "child" });
+    expect(response.status).toBe(202);
+    expect(await response.json()).toEqual({ linkId: h.store.links[0]!.id });
+    const config = h.calls.find(call => call.step === "config")!;
+    expect(config.options?.maxOutputBytes).toBe(SSH_MAX_OUTPUT_BYTES);
+  });
+
+  test("a Child preflight failure carries the Child's own reason (#8357)", async () => {
+    // The line a real `ocx config show --json` prints for an invalid saved configuration: generic,
+    // and long enough that the 160-code-point cap cuts it before naming any defect.
+    const showWarning = "Warning: Config at /var/lib/opencodex-child/Library/Application Support/opencodex/config.json is invalid or unreadable; defaults are being shown for invalid settings. Run: ocx config validate. Inspect: ocx config show --source.\n";
+    const h = harness(); h.confirmed();
+    h.overrides.config = () => ({ code: 1, stdout: "", stderr: showWarning });
+    h.overrides.validate = () => ({ code: 1, stdout: '{\n  "ok": false,\n  "error": "schema_invalid: defaultProvider: defaultProvider must exist in providers"\n}\n', stderr: "" });
+    const payload = await denied(await h.call("apply", { alias: "child" }), "child_preflight_failed") as { error: { hint: string } };
+    expect(payload.error.hint).toBe("Child config is invalid: schema_invalid: defaultProvider: defaultProvider must exist in providers");
+    expect(h.calls.find(call => call.step === "validate")?.options?.maxOutputBytes).toBe(16 * 1024);
+    noEnrollmentEffects(h);
+    // A Child without `config validate` (ocx-child, an older ocx) keeps the config show reason.
+    const legacy = harness(); legacy.confirmed();
+    legacy.overrides.config = () => ({ code: 1, stdout: "", stderr: "opencodex: invalid config\nError: defaultProvider must exist in providers\n" });
+    const third = await denied(await legacy.call("apply", { alias: "child" }), "child_preflight_failed") as { error: { hint: string } };
+    expect(third.error.hint).toBe("Error: defaultProvider must exist in providers");
+    // A validate that times out must not mask it either.
+    const hung = harness(); hung.confirmed();
+    hung.overrides.config = () => ({ code: 1, stdout: "", stderr: "Error: defaultProvider must exist in providers\n" });
+    hung.overrides.validate = () => { throw new SshRunnerError("timeout", "ssh command timed out"); };
+    const fourth = await denied(await hung.call("apply", { alias: "child" }), "child_preflight_failed") as { error: { hint: string } };
+    expect(fourth.error.hint).toBe("Error: defaultProvider must exist in providers");
+    const unreadable = harness(); unreadable.confirmed();
+    unreadable.overrides.config = () => result("not json\n");
+    const second = await denied(await unreadable.call("apply", { alias: "child" }), "child_preflight_failed") as { error: { hint: string } };
+    expect(second.error.hint).toContain("config show --json");
+    expect(unreadable.calls.some(call => call.step === "validate")).toBe(false);
+  });
+
+  test("an output limit in Child preflight names the cap instead of failing generically", async () => {
+    const h = harness(); h.confirmed();
+    h.overrides.config = () => { throw new SshRunnerError("output_limit", `ssh output exceeded ${SSH_MAX_OUTPUT_BYTES} bytes`); };
+    const payload = await denied(await h.call("apply", { alias: "child" }), "child_preflight_output_limit") as { error: { hint: string } };
+    expect(payload.error.hint).toContain("config show --json");
+    expect(payload.error.hint).toContain(String(SSH_MAX_OUTPUT_BYTES));
+    expect(payload.residual).toBeUndefined(); noEnrollmentEffects(h);
   });
 
   test("huge measured latency caps ordinary work at 60s and restart at 190s", async () => {
@@ -355,16 +423,38 @@ describe("server-owned confirmation and authority", () => {
 
   test("failed optional version probe cannot publish a pending host", async () => {
     const h = harness(); h.overrides.version = () => result("opencodex 2.83.0\n", 125);
-    await denied(await h.call("probe", { alias: "child", includeVersion: true }), "remote_platform_unsupported", 409);
-    expect(h.state.pendingHosts.size).toBe(0); expect(existsSync(h.knownHosts)).toBe(false); noEnrollmentEffects(h);
+    await denied(await h.call("probe", { alias: "child", includeVersion: true }), "version_probe_failed");
+    expect(h.state.pendingHosts.size).toBe(0); noEnrollmentEffects(h);
   });
 
-  test("Windows status 125 wins over an outdated version before committing host trust or issuing a key", async () => {
-    const h = harness(); h.seed(); writeFileSync(h.knownHosts, "existing ssh-ed25519 EXISTING\n");
-    h.overrides.version = () => result("opencodex 2.1.0\n", 125);
-    await denied(await h.call("confirm-host", { alias: "child", fingerprint }), "remote_platform_unsupported", 409);
-    expect(readFileSync(h.knownHosts, "utf8")).toBe("existing ssh-ed25519 EXISTING\n");
-    expect(h.state.confirmedHosts?.size).toBe(0); noEnrollmentEffects(h);
+  test("an unknown remote platform issues no key and creates no link", async () => {
+    const h = harness(); h.overrides.uname = () => result("?");
+    await denied(await h.call("probe", { alias: "child" }), "probe_failed");
+    expect(h.state.pendingHosts.size).toBe(0); noEnrollmentEffects(h);
+  });
+
+  test("a failed cross-shell echo refuses before platform discovery and key issuance", async () => {
+    const h = harness(); h.overrides.probe = () => result("", 255);
+    await denied(await h.call("probe", { alias: "child" }), "probe_failed");
+    expect(h.calls.map(call => call.step)).toEqual(["probe"]); noEnrollmentEffects(h);
+  });
+
+  test("Windows enrollment restarts the Child and requires a fresh authenticated Home catalog", async () => {
+    const h = harness("windows");
+    expect((await h.call("probe", { alias: "child" })).status).toBe(200);
+    expect((await h.call("confirm-host", { alias: "child", fingerprint })).status).toBe(200);
+    expect((await h.call("apply", { alias: "child", fingerprint })).status).toBe(202);
+    expect(h.store.links[0]?.remotePlatform).toBe("windows");
+    expect(h.calls.some(call => call.step === "curl")).toBe(false);
+    expect(h.admissions.map(admission => admission.phase)).toEqual(["enrollment", "catalog"]);
+    expect(h.input!.every(byte => byte === 0)).toBe(true);
+    for (const call of h.calls) expect(call.argv.join(" ")).not.toContain("fixture-child-key");
+  });
+
+  test("Windows restart failure compensates the key and exposes residual recovery", async () => {
+    const h = harness("windows"); h.confirmed(); h.overrides.restart = () => result("", 1);
+    expect(await denied(await h.call("apply", { alias: "child" }), "child_restart_failed")).toMatchObject({ residual: true, recovery });
+    cleanFailure(h, false);
   });
 
   test("fingerprint mismatch refuses both confirmation and apply without SSH", async () => {

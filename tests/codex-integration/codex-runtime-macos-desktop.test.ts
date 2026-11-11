@@ -7,6 +7,8 @@ import {
   setCodexRuntimeResolveCacheForTests, type ResolveCodexRuntimeDeps,
 } from "../../src/codex/runtime";
 import { loadBundledCodexCatalog, loadBundledCodexCatalogAsync } from "../../src/codex/catalog/bundled";
+import { codexSupportedReasoningEfforts } from "../../src/codex/catalog/effort";
+import { inspectClientCatalogReadiness } from "../../src/client/catalog-compatibility";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 
 const roots: string[] = [];
@@ -19,7 +21,7 @@ const ID = "<key>CFBundleIdentifier</key><string>com.openai.codex</string>";
 const plist = (body = ID) => `<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd"><plist version="1.0"><dict>${body}</dict></plist>`;
 
 function fixture() {
-  const home = mkdtempSync(join(tmpdir(), "ocx-mac-runtime-"));
+  const home = realpathSync(mkdtempSync(join(tmpdir(), "ocx-mac-runtime-")));
   roots.push(home);
   const bundle = posix.join(home.replaceAll("\\", "/"), "Applications/ChatGPT.app");
   const configDir = join(home, "config");
@@ -38,6 +40,12 @@ function fixture() {
   const deps: ResolveCodexRuntimeDeps = {
     platform: "darwin", env: { HOME: home.replaceAll("\\", "/"), PATH: "" }, configDir,
     existsSync: path => versions.has(path), execFileSync: exec, execFile: async file => exec(file),
+    // Virtual executables stay injected; real fixture symlinks retain their
+    // canonical targets. Both trust halves are stubbed so no dscl/codesign runs.
+    executable: path => versions.has(path),
+    realpath: path => { try { return realpathSync(path); } catch { return path; } },
+    macBundleTrustReason: () => null,
+    macBundleTrustReasonAsync: async () => null,
   };
   const pin = (command: string, origin?: "pinned" | "discovered") => writeFileSync(codexRuntimeStatePath(configDir), JSON.stringify({
     version: 1, command, source: "installed", selectedVersion: "0.150.0", updatedAt: "2026-10-13T00:00:00Z", origin,
@@ -66,16 +74,28 @@ describe.skipIf(process.platform === "win32")("macOS Codex app runtime discovery
     expect(resolveCodexRuntime(f.deps).runtime.command).toBe(f.current);
   });
 
+  test("rejects an app CLI that fails publisher or filesystem trust before probing", () => {
+    const f = fixture(); f.versions.set(f.current, "0.162.0");
+    const checked: string[][] = [];
+    f.deps.macBundleTrustReason = (bundle, binary) => { checked.push([bundle, binary]); return "untrusted"; };
+    expect(resolveCodexRuntime(f.deps).runtime.source).toBe("fallback");
+    expect(checked).toContainEqual([f.bundle, f.current]);
+    expect(f.probed).not.toContain(f.current);
+  });
+
   for (const source of ["environment", "configured", "shim", "path", "installed", "fallback"] as const) {
     test(`${source} precedes the app during version discovery`, () => {
       const f = fixture();
       const command = source === "fallback" ? "codex" : source === "installed" ? "/usr/local/bin/codex" : "/fixture/bin/codex";
-      f.versions.set(command, "0.150.0"); f.versions.set(f.current, "0.162.0");
+      f.versions.set(source === "fallback" ? "/usr/bin/codex" : command, "0.150.0"); f.versions.set(f.current, "0.162.0");
+      // No enumerated PATH candidates: execvp still finds the bare fallback on its default path.
+      if (source === "fallback") delete f.deps.env!.PATH;
       if (source === "environment") f.deps.env!.CODEX_CLI_PATH = command;
       if (source === "configured") f.pin(command, "pinned");
       if (source === "shim") writeFileSync(join(f.deps.configDir!, "codex-shim.json"), JSON.stringify({ originalPath: command }));
       if (source === "path") f.deps.env!.PATH = "/fixture/bin";
       expect(resolveCodexRuntime(f.deps).runtime).toEqual({ command, source, version: "0.150.0" });
+      if (source === "fallback") expect(f.probed).toContain("/usr/bin/codex");
     });
   }
 
@@ -180,13 +200,17 @@ describe.skipIf(process.platform === "win32")("macOS Codex app runtime discovery
     expect(reads).toBeGreaterThan(0);
   });
 
-  test("a canonical app path on PATH under a symlinked HOME never takes over a persisted selection", () => {
+  test("a canonical app path on PATH under a symlinked HOME never takes over a persisted selection", async () => {
     const f = symlinkedHome(), persisted = "/fixture/persisted/codex";
     f.pin(persisted, "discovered"); f.versions.set(persisted, "0.150.0"); f.versions.set(f.canonical, "0.162.0");
     f.deps.env!.PATH = posix.dirname(f.canonical);
     const result = resolveCodexRuntime(f.deps);
     expect(result.runtime.command).toBe(persisted);
     expect(result.supersededDiscovered).toBeUndefined();
+    expect(result.replacedConfigured).toBeUndefined();
+    expect(f.probed).toContain(persisted);
+    expect(f.probed).toContain(f.canonical);
+    expect(await resolveCodexRuntimeAsync(f.deps)).toEqual(result);
   });
 
   test("an established install path that links into the app keeps its precedence", () => {
@@ -196,11 +220,14 @@ describe.skipIf(process.platform === "win32")("macOS Codex app runtime discovery
     const link = posix.join(f.deps.env!.HOME!, ".local/bin/codex");
     mkdirSync(posix.dirname(link), { recursive: true });
     symlinkSync(f.current, link);
-    f.versions.set(link, "0.150.0"); f.versions.set(f.current, "0.162.0");
+    // The alias and its backing executable are one binary and expose one version.
+    f.versions.set(link, "0.150.0"); f.versions.set(f.current, "0.150.0");
     let reads = 0;
     f.deps.readBundleIdentifier = () => { reads++; return "com.openai.codex"; };
     // The link is an established install: it precedes the app candidates and is identity-checked.
     expect(resolveCodexRuntime(f.deps).runtime).toEqual({ command: link, source: "installed", version: "0.150.0" });
+    expect(f.probed).toContain(f.current);
+    expect(f.probed).not.toContain(link);
     expect(reads).toBeGreaterThan(0);
     f.deps.readBundleIdentifier = () => "com.example.other";
     expect(resolveCodexRuntime(f.deps).runtime.source).toBe("fallback");
@@ -255,6 +282,11 @@ describe.skipIf(process.platform === "win32")("macOS Codex app runtime discovery
     expect(() => setCodexRuntimeResolveCacheForTests({ runtime: { command: "codex", version: null, source: "fallback" }, failures: [] },
       { readBundleIdentifier: () => "com.openai.codex" })).toThrow("Injected runtime dependencies");
   });
+
+  test("an injected bundle trust check cannot populate the process memo", () => {
+    expect(() => setCodexRuntimeResolveCacheForTests({ runtime: { command: "codex", version: null, source: "fallback" }, failures: [] },
+      { macBundleTrustReason: () => null })).toThrow("Injected runtime dependencies");
+  });
 });
 
 describe("bundled app catalog consumer", () => {
@@ -267,11 +299,141 @@ describe("bundled app catalog consumer", () => {
         if (kind === "spawn-failure") throw Object.assign(new Error("not found"), { code: "ENOENT" });
         return JSON.stringify({ models: kind === "null-row" ? [null] : kind === "mixed-null-row" ? [native, null] : kind === "array-row" ? [[]] : [native] });
       };
-      const deps = { platform: "darwin" as const, commandCandidates: () => [f.current], configDir: f.deps.configDir, execFileSync: exec, execFile: async () => exec() };
+      // A POSIX-absolute non-bundle candidate: the boundary resolves it on any
+      // host (f.current is a Windows-flavored path this describe cannot use),
+      // and it classifies outside the known bundles so output handling - not
+      // trust - is what is exercised. Fixture versions drive exists/executable.
+      const command = "/fixture/bin/codex";
+      f.versions.set(command, "0.162.0");
+      const deps = {
+        platform: "darwin" as const, commandCandidates: () => [command], configDir: f.deps.configDir,
+        execFileSync: exec, execFile: async () => exec(), env: f.deps.env,
+        existsSync: f.deps.existsSync, executable: f.deps.executable, realpath: f.deps.realpath,
+        macBundleTrustReason: f.deps.macBundleTrustReason, macBundleTrustReasonAsync: f.deps.macBundleTrustReasonAsync,
+      };
       const sync = loadBundledCodexCatalog(deps), asyncResult = await loadBundledCodexCatalogAsync(deps);
       expect(asyncResult).toEqual(sync);
       if (kind === "valid") expect(sync?.models[0]?.slug).toBe("gpt-test");
       else expect(sync).toBeNull();
     });
   }
+});
+
+/**
+ * #8360: a macOS Child whose only Codex is the CLI inside ChatGPT.app reported
+ * `readiness: unverified` ("the selected local Codex runtime did not report the reasoning
+ * levels it supports"). The runtime resolver only offers the app candidate after it can
+ * classify the bundle's XML `Info.plist` identity, so a bundle it cannot classify leaves the
+ * selection on the bare `codex` sentinel. The readiness probe then asked a command that does
+ * not exist while a real, trusted Codex sat inside the app.
+ */
+// The virtual app paths below are POSIX; on Windows the exec boundary treats them as relative.
+describe.skipIf(process.platform === "win32")("app-bundled CLI fallback for connect readiness (#8360)", () => {
+  /** A catalog with a distinctive ladder, so a warm fixture value cannot pass by accident. */
+  const bundledCatalog = JSON.stringify({ models: [{
+    slug: "gpt-5.6-sol",
+    base_instructions: "Fixture instructions.",
+    supported_reasoning_levels: [{ effort: "low" }, { effort: "high" }],
+  }] });
+
+  /** Exec seam: only the bundled CLI answers, with its version or its bundled catalog. */
+  function bundledOnlyExec(appCommand: string, spawned: string[]) {
+    return (file: string, args: readonly string[]) => {
+      spawned.push(file);
+      if (file !== appCommand) throw Object.assign(new Error("not found"), { code: "ENOENT" });
+      return args[0] === "debug" ? bundledCatalog : "codex-cli 0.166.0-alpha.6";
+    };
+  }
+
+  test("an app-bundled-only layout yields the bundled ladder and reports ready", () => {
+    const f = fixture();
+    // The bundle identity is not classifiable (the shape an app update can leave behind), so
+    // discovery declines the app candidate and the resolver ends on the bare sentinel.
+    f.deps.readBundleIdentifier = () => null;
+    f.versions.set(f.current, "0.166.0-alpha.6");
+    const spawned: string[] = [];
+    const exec = bundledOnlyExec(f.current, spawned);
+    const selected = resolveCodexRuntime({ ...f.deps, discoverAlternatives: false, execFileSync: exec });
+    expect(selected.runtime.command).toBe("codex");
+
+    const efforts = codexSupportedReasoningEfforts({
+      ...f.deps, execFileSync: exec, commandCandidates: () => [selected.runtime.command],
+      selectedRuntime: selected.runtime,
+    });
+    expect(efforts).toEqual(new Set(["low", "high"]));
+    expect(inspectClientCatalogReadiness("present", bundledCatalog, { supportedEfforts: () => efforts }))
+      .toEqual({ kind: "ready" });
+    expect(spawned).toContain(f.current);
+  });
+
+  test("app locations that do not exist leave the ladder unverified instead of inventing one", () => {
+    const f = fixture();
+    f.deps.readBundleIdentifier = () => null;
+    const spawned: string[] = [];
+    const exec = bundledOnlyExec(f.current, spawned);
+    const efforts = codexSupportedReasoningEfforts({
+      ...f.deps, execFileSync: exec, commandCandidates: () => ["codex"],
+      selectedRuntime: { command: "codex", version: null, source: "fallback" },
+    });
+    expect(efforts).toBeNull();
+    // No app binary exists, so none is offered; the bare sentinel cannot resolve at the exec
+    // boundary either. A missing runtime stays unverified rather than borrowing a ladder.
+    expect(spawned).toEqual([]);
+  });
+
+  test("a resolved absolute command is probed as given, without widening to app candidates", () => {
+    const f = fixture();
+    const standalone = "/fixture/bin/codex";
+    f.versions.set(standalone, "0.167.0");
+    f.versions.set(f.current, "0.166.0-alpha.6");
+    const spawned: string[] = [];
+    const exec = (file: string, args: readonly string[]) => {
+      spawned.push(file);
+      return args[0] === "debug" ? bundledCatalog : "codex-cli 0.167.0";
+    };
+    expect(codexSupportedReasoningEfforts({
+      ...f.deps, execFileSync: exec, commandCandidates: () => [standalone],
+      selectedRuntime: { command: standalone, version: "0.167.0", source: "installed" },
+    })).toEqual(new Set(["low", "high"]));
+    expect(spawned).toEqual([standalone]);
+  });
+
+  test("a selected runnable bare command keeps its own answer instead of borrowing the app's ladder", async () => {
+    const f = fixture();
+    f.versions.set(f.current, "0.166.0-alpha.6");
+    const spawned: string[] = [];
+    // Only the app answers. The selected bare command was runnable when it was resolved (it has a
+    // version), so it is the operator's runtime rather than the unresolved sentinel: its failure to
+    // report a catalog must leave the ladder unverified, not substitute the app's.
+    const exec = bundledOnlyExec(f.current, spawned);
+    for (const selectedRuntime of [
+      { command: "codex", version: "0.140.0", source: "fallback" },
+      { command: "codex-beta", version: "0.141.0", source: "environment" },
+    ] as const) {
+      expect(codexSupportedReasoningEfforts({
+        ...f.deps, execFileSync: exec, commandCandidates: () => [selectedRuntime.command], selectedRuntime,
+      })).toBeNull();
+      expect(await loadBundledCodexCatalogAsync({
+        ...f.deps, commandCandidates: () => [selectedRuntime.command], selectedRuntime,
+        execFileSync: exec as never, execFile: async (file, args) => exec(file, args),
+      })).toBeNull();
+    }
+    expect(spawned).not.toContain(f.current);
+  });
+
+  test("the async bundled-catalog driver widens a bare sentinel the same way", async () => {
+    const f = fixture();
+    f.versions.set(f.current, "0.166.0-alpha.6");
+    const spawned: string[] = [];
+    const exec = bundledOnlyExec(f.current, spawned);
+    const catalog = await loadBundledCodexCatalogAsync({
+      ...f.deps,
+      commandCandidates: () => ["codex"],
+      selectedRuntime: { command: "codex", version: null, source: "fallback" },
+      execFileSync: exec as never,
+      execFile: async (file, args) => exec(file, args),
+    });
+    expect(catalog?.models[0]?.slug).toBe("gpt-5.6-sol");
+    expect(spawned).toContain(f.current);
+  });
 });

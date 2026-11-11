@@ -16,7 +16,7 @@ yardımcı özellikleri nasıl çalıştıracağını kontrol eder.
 | `proxy?` | `string` | — | Giden HTTP(S) veya SOCKS5 proxy URL'si (`socks5://host:port`) ya da `${ENV_VAR}`. HTTP URL'leri değişkenler boşsa `HTTP_PROXY` / `HTTPS_PROXY`'ye yazılır. SOCKS5 URL'leri yerleşik gerçek SOCKS5 tünelini kullanır ve `ALL_PROXY`'ye de yazılır (`ocx start --socks5`); bu süreçte miras `HTTP(S)_PROXY` temizlenir. Geri döngü `NO_PROXY` içinde kalır. |
 | `emptyCompletionRetry?` | `boolean` | `false` | Metin veya araç çağrısı içermeyen bir Responses tamamlamasını aynı istekle bir kez yeniden denemeyi açıkça etkinleştirir. Yeniden deneme ücretlendirilebilir. `OCX_EMPTY_COMPLETION_RETRY=0`, yapılandırmayı değiştirmeden devre dışı bırakır; combo ve routed-compaction turları hariçtir. |
 | `stallTimeoutSec?` | `number` | `300` (public) / kapalı (local) | Akış kesilmeden önce anlamlı üst sunucu ilerlemesi olmadan geçen saniye (Responses ve yerel Chat). Ayarlanmamışsa **yerel** üst sunucu (loopback, private, `.local`/`.lan` adı) için varsayılan kapalı, genel üst sunucu için 300 sn; pozitif değer ikisine de uygulanır (en az 1 sn); `0` sessizlik watchdog'unu her yerde kapatır. Canonical ChatGPT SSE'yi akışsız JSON'a katlayan Responses isteklerinde watchdog kapalı olsa bile bağımsız 15 dakikalık toplam tur sınırı kalır. `/v1/responses/compact` için bekleyen gövde okumaları bu bütçeyi paylaşır ama yerel üst sunucuda bile varsayılan 300 sn'dir; açık değer (`0` dahil) önceliklidir. |
-| `connectTimeoutMs?` | `number` | `200000` | Deneme başına DNS/TCP/TLS/nihai başlık son tarihi; gövde üretiminden önce biter. |
+| `connectTimeoutMs?` | `number` | `200000` (public) / kapalı (local) | İsteğin gönderilmesinden üst sunucunun ilk yanıt başlığını döndürmesine kadar deneme başına son tarih (DNS/TCP/TLS ve başlık bekleme); gövde üretiminden önce biter ve gövde akışını yöneten `stallTimeoutSec` ile ilgisizdir. Ayarlanmamışsa **yerel** üst sunucu (loopback, private, `.local`/`.lan` adı) için varsayılan kapalı, genel üst sunucu için 200 sn; pozitif değer ikisine de uygulanır; `0` (veya herhangi bir pozitif olmayan değer) başlık son tarihini her yerde kapatır. Kapalı olması, yerel bir modelin büyük istemde dakikalarca prompt prefill yapmasına rağmen ilk başlık saatinin sağlıklı bir isteği kesmemesini sağlar. |
 | `shutdownTimeoutMs?` | `number` | `5000` | Aktif turlar iptal edilmeden önce zarif boşaltma süresi sınırı. |
 | `websockets?` | `boolean` | `false` | Responses WebSocket yolu için `supports_websockets` bildirin. False, HTTP/SSE'yi tutar. |
 | `corsAllowOrigins?` | `string[]` | `[]` | CORS tarafından izin verilen ek tam kaynaklar. Geri döngü kaynaklarına her zaman izin verilir. `chrome-extension://<extension-id>` gibi yetki tabanlı tarayıcı uzantısı kaynakları desteklenir; `*` bir joker karakter değildir. Firefox ve Safari uzantı UUID'sini yeniden oluşturur (yükleme başına / tarayıcı başlatma başına), bu nedenle kaynak değiştiğinde girdiyi güncelleyin. |
@@ -32,6 +32,7 @@ yardımcı özellikleri nasıl çalıştıracağını kontrol eder.
 | `webSearchSidecar?` | `OcxWebSearchSidecarConfig` | kullanılabilir olduğunda açık | Web arama sidecar seçenekleri. |
 | `visionSidecar?` | `OcxVisionSidecarConfig` | kullanılabilir olduğunda açık | Görsel açıklama sidecar seçenekleri. |
 | `images?` | `OcxImagesConfig` | otomatik OpenAI seçimi | Codex `image_gen` için bağımsız Görseller aktarma seçenekleri. |
+| `telemetry?` | `OcxTelemetryConfig` | insan bildiriminden sonra varsayılan olarak açık | Anonim günlük kullanım telemetrisi onay durumu (`decision`, `decidedAt`, `noticeShownAt`). Bir kişi bildirimi görene veya onay verene kadar hiçbir şey gönderilmez. `OCX_TELEMETRY=0` veya `DO_NOT_TRACK=1` ile geçersiz kılınır. Bkz. [Telemetri (`telemetry`)](#telemetri-telemetry) ve [Telemetri ve Gizlilik](/tr/guides/telemetry/). |
 
 Daha eski bir geliştirme derlemesi yedekleme desteği var olmadan önce devam
 geçmişi meta verilerini değiştirdiyse yerel sağlayıcı kurtarmasını zorlamak için
@@ -169,6 +170,35 @@ bağlama için güvenlidir. `ssh -g -L`, geniş kapsayıcı yayınlama veya iste
 tarafını `0.0.0.0` üzerinde açığa çıkaran yönlendirme modlarını kullanmayın.
 Emin olmadığınızda `ssh -L 127.0.0.1:20100:localhost:10100` ile açıkça bağlayın.
 :::
+
+## Telemetri (`telemetry`)
+
+Anonim günlük kullanım telemetrisi yalnızca bir kişi açıklama bildirimini (GUI açılır penceresinde veya etkileşimli bir terminal isteminde) gördükten sonra varsayılan olarak açık hale gelir. `config.json` içindeki `telemetry` bloğu bu onay durumunu kaydeder:
+
+```json
+{
+  "telemetry": {
+    "decision": "accepted",
+    "decidedAt": "2026-11-07T09:00:00.000Z",
+    "noticeShownAt": "2026-11-07T09:00:00.000Z"
+  }
+}
+```
+
+| Alan | Tip | Varsayılan | Anlamı |
+| --- | --- | --- | --- |
+| `telemetry.decision?` | `"accepted" \| "declined"` | ayarlanmamış (kararsız) | Açık kullanıcı seçimi. `"declined"` telemetriyi devre dışı bırakır ve `<OPENCODEX_HOME>/telemetry-id.json` dosyasını siler; `"accepted"` günlük raporları etkinleştirir. |
+| `telemetry.decidedAt?` | `string` (ISO 8601) | ayarlanmamış | `decision` değerinin kaydedildiği UTC zaman damgası. Yalnızca `decidedAt ?? noticeShownAt` UTC gününden kesin olarak sonraki tamamlanmış UTC takvim günleri (`day > formatUtcDay(decidedAt ?? noticeShownAt)`) gönderilir; onay günü ve önceki günler asla gönderilmez. |
+| `telemetry.noticeShownAt?` | `string` (ISO 8601) | ayarlanmamış | Bir insanın web kontrol panelinde veya etkileşimli bir terminalde bildirimi gördüğü UTC zaman damgası. `decision` ayarlanmadığında telemetri yalnızca `noticeShownAt` ayarlanmışsa (`default-on`) gönderim yapar; aksi halde proxy `awaiting-notice` durumunda kalır. |
+
+Toplayıcı uç noktası (`https://telemetry.opencodex.me/v1/events`) bir kod sabitidir ve `config.json` içinde yapılandırılamaz.
+
+İki ortam değişkeni `config.json` dosyasını geçersiz kılar ve kaydedilmiş `config.json` dosyasını değiştirmeden telemetriyi hemen devre dışı bırakır (proxy başlangıcında veya zamanlayıcı adımında algılandığında `<OPENCODEX_HOME>/telemetry-state.json` içine bugünün UTC gününü `ineligibleThroughDay` olarak kaydeder ve `<OPENCODEX_HOME>/telemetry-id.json` dosyasını siler; değişken kaldırıldığında bu günler gönderilmez ve yeni bir kimlik üretilir):
+
+- `OCX_TELEMETRY=0` (büyük/küçük harf duyarsız olarak `false`, `off` veya `no` da kabul eder)
+- `DO_NOT_TRACK=1` (büyük/küçük harf duyarsız olarak `true` veya `yes` de kabul eder)
+
+`ocx config set telemetry` ve `ocx config unset telemetry` reddedilir ve `ocx config import` tüm çağrılarda içe aktarılan `telemetry` bloğunu yoksayarak mevcut durumu korur; bunun yerine `ocx telemetry enable` (etkileşimli insan terminali ve onay istemi gerektirir, aksi halde `agent_consent_required` / `tty_required` ile çıkar), `ocx telemetry disable`, `ocx telemetry status [--json]` veya kontrol panelindeki **Proxy ayrıntıları** anahtarını kullanın. Tam yük şeması ve saklama politikası için [Telemetri ve Gizlilik](/tr/guides/telemetry/) sayfasına bakın.
 
 ## Depolama temizliği
 
@@ -353,3 +383,11 @@ Sürüm düşürme, kanonik toplamların korunacağını veya aynı trafik başt
 Yayımlanmamış deneysel sürümlerin `pool-current` veya `poolContinuity` içeren günlükleri, daha sonra sıkıştırılsalar bile C sözleşmesinin dışındadır. Özgün bakiyeleri normal saklama süresi dolana kadar belirsiz geçmiş olarak tutulur; hemen dönüştürülmez veya silinmez.
 
 Tam ama geçersiz bir kayıt, son satırdaki `null` dahil, sınır uygulanan isteklerin kabulünü engeller. Sıkıştırma geçerli muhasebeyi temiz bir kontrol noktasında koruyabilir; çalışan süreç temiz günlükle yeniden başlatılana kadar ret durumu sürer. Yarım kalmış son JSON satırı mevcut kurtarma kurallarına tabidir. Ayrıntılar ve hata kodları için [İngilizce kaynağa](/reference/configuration/server/#historical-pool-continuity) bakın.
+
+## Yerel upstream zaman aşımı sınıflandırması
+
+Bu sınıflandırma zaman aşımı politikasıdır; ağ erişim izni vermez. HTTP(S) hedefi DNS sorgusu olmadan değerlendirilir: tam `localhost` (büyük/küçük harf duyarsız, son nokta kabul edilir), `0.0.0.0`, IPv4 loopback (127/8), RFC 1918 özel ve link-local (169.254/16), IPv6 loopback, link-local (fe80::/10), unique-local (fc00::/7), IPv4-mapped eşdeğerleri ve `.local`/`.lan` adları yereldir. Diğer DNS adları loopback adresine çözülse bile genel hedef sürelerini korur. Hatalı hedefler, desteklenmeyen şemalar ve `localhost.example` de geneldir.
+
+Başlık süresini kapatmak istemci iptalini ve dış toplam süreyi korur. Açıkça pozitif `stallTimeoutSec`, yerel gövde sessizliğini sınırlar. Yerel header/stall ayarları yoksa başlıklardan önce otomatik süre sınırı yoktur. Yerel native Chat/Messages JSON okumaları stall bütçesini kullanır; genel JSON okumaları eski `max(connectTimeoutMs ?? 200000, 5000)` bütçesini korur. Compact gövdesinin yerelde de 300 saniyelik varsayılanı ve image/search sidecar bütçeleri değişmez.
+
+İsteğe bağlı `opencodeClientExport` içindeki `headerTimeoutMs`, `chunkTimeoutMs`, `timeoutMs` pozitif milisaniye veya kapatmak için `false` alır. Eksik değerler OpenCode varsayılanlarını korur; geçersiz alanlar atlanır. V1 options ve V2 settings içinde provider genelinde uygulanır. [Yavaş yerel modeller](/guides/opencode/#slow-local-models-prefill-timeouts) bölümüne bakın.

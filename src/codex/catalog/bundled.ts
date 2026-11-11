@@ -33,9 +33,13 @@ import upstreamModelsSnapshot from "../data/upstream-models.json";
 import { decodeOverlayState } from "../shim-state-file";
 
 
-import { activeCodexModelsCachePath, catalogBackupPathFor, findNativeTemplate, findSupportedNativeTemplate, isDefaultCatalogPath, legacyCatalogBackupPath, parseCatalogJson, readCatalog, readCatalogBackup, readCodexCatalogPath } from "./parsing";
+import { activeCodexModelsCachePath, catalogBackupPathFor, ensureStrictCatalogFields, findNativeTemplate, findSupportedNativeTemplate, isDefaultCatalogPath, legacyCatalogBackupPath, parseCatalogJson, readCatalog, readCatalogBackup, readCodexCatalogPath } from "./parsing";
+import { retainedNativeInheritanceTemplate } from "./native-template";
 import type { RawCatalog, RawEntry } from "./parsing";
-import { codexExecInvocation, isSpawnableCodexCandidate } from "../exec-invocation";
+import { isSpawnableCodexCandidate } from "../exec-invocation";
+import { validatedCodexExecInvocation, validatedCodexExecInvocationAsync } from "../exec-boundary";
+import { macCodexAppCommands } from "../mac-app-bundle";
+import { isPlainObject } from "../../lib/plain-data";
 import {
   parsePersistedCodexRuntime,
   peekCodexRuntimeProcessCache,
@@ -44,10 +48,12 @@ import {
   codexRuntimeSelectionIdentity,
   codexRuntimeStateEpoch,
   execCodexFileAsync,
+  codexRuntimeIsUnresolved,
 } from "../runtime";
 import type {
   DeepReadonly,
   EffortClampDiagnostic,
+  ResolveCodexRuntimeResult,
   ResolvedCodexRuntime,
 } from "../runtime";
 import type {
@@ -185,6 +191,12 @@ export interface BundledCatalogDeps {
   /** Already-observed source for server clamping; null never triggers a probe. */
   observedCatalog?: ReadonlyRawCatalog | null;
   commandCandidates?: () => string[];
+  /**
+   * The resolver selection `commandCandidates` came from, when the caller resolved first. Only an
+   * unresolved selection lets the macOS probe add the ChatGPT.app CLI (#8360); without it, injected
+   * candidates are probed as given.
+   */
+  selectedRuntime?: Pick<ResolvedCodexRuntime, "source" | "version">;
   execFileSync?: ExecFile;
   execFile?: (...args: Parameters<ExecFile>) => Promise<string>;
   onEffortClamp?: (diagnostic: EffortClampDiagnostic) => void;
@@ -193,6 +205,14 @@ export interface BundledCatalogDeps {
   platform?: NodeJS.Platform;
   existsSync?: (path: string) => boolean;
   readFileSync?: (path: string, encoding: "utf8") => string;
+  /** Exec-boundary bundle trust for sync drivers (resolve + debug exec). */
+  macBundleTrustReason?: (bundleRoot: string, binary: string) => string | null;
+  /** Exec-boundary bundle trust for async drivers; injected checks bypass the runtime memo. */
+  macBundleTrustReasonAsync?: (bundleRoot: string, binary: string, signal?: AbortSignal) => Promise<string | null>;
+  /** Exec-boundary spawnability predicate (regular file + X_OK). */
+  executable?: (path: string) => boolean;
+  /** Exec-boundary canonicalizer; returns null when the path cannot be resolved. */
+  realpath?: (path: string) => string | null;
   now?: () => number;
   discoverAlternatives?: boolean;
 }
@@ -246,12 +266,43 @@ export function codexShimCommandCandidates(): string[] {
 export function runCodexDebugModels<T>(
   command: string,
   execFile: (...args: Parameters<ExecFile>) => T,
-  deps: Pick<BundledCatalogDeps, "env" | "platform" | "existsSync"> = {},
+  deps: Pick<BundledCatalogDeps, "env" | "platform" | "existsSync" | "executable" | "realpath" | "macBundleTrustReason"> = {},
 ): T {
   const args = ["debug", "models", "--bundled"];
-  const invocation = codexExecInvocation(command, args, deps.platform ?? process.platform, {
+  const invocation = validatedCodexExecInvocation(command, args, {
     env: deps.env,
+    platform: deps.platform,
     exists: deps.existsSync,
+    executable: deps.executable,
+    realpath: deps.realpath,
+    macBundleTrustReason: deps.macBundleTrustReason,
+  });
+  return execFile(invocation.file, invocation.args, {
+    encoding: "utf8" as const,
+    stdio: ["ignore", "pipe", "ignore"] as ["ignore", "pipe", "ignore"],
+    timeout: 10_000,
+    maxBuffer: 64 * 1024 * 1024,
+    windowsHide: true,
+    ...invocation.options,
+  });
+}
+
+/** Async twin of runCodexDebugModels: same args/options, bundle trust checked off the event loop. */
+export async function runCodexDebugModelsAsync<T>(
+  command: string,
+  execFile: (...args: Parameters<ExecFile>) => Promise<T>,
+  deps: Pick<BundledCatalogDeps, "env" | "platform" | "existsSync" | "executable" | "realpath" | "macBundleTrustReasonAsync"> = {},
+  signal?: AbortSignal,
+): Promise<T> {
+  const args = ["debug", "models", "--bundled"];
+  const invocation = await validatedCodexExecInvocationAsync(command, args, {
+    env: deps.env,
+    platform: deps.platform,
+    exists: deps.existsSync,
+    executable: deps.executable,
+    realpath: deps.realpath,
+    macBundleTrustReasonAsync: deps.macBundleTrustReasonAsync,
+    signal,
   });
   return execFile(invocation.file, invocation.args, {
     encoding: "utf8" as const,
@@ -275,6 +326,12 @@ function bundledRuntimeDeps(deps: BundledCatalogDeps) {
       platform: deps.platform,
       existsSync: deps.existsSync,
       readFileSync: deps.readFileSync,
+      // Exec-boundary trust deps forwarded so the runtime's own --version probes
+      // use the same injected checks as the catalog exec below.
+      ...(deps.macBundleTrustReason ? { macBundleTrustReason: deps.macBundleTrustReason } : {}),
+      ...(deps.macBundleTrustReasonAsync ? { macBundleTrustReasonAsync: deps.macBundleTrustReasonAsync } : {}),
+      ...(deps.executable ? { executable: deps.executable } : {}),
+      ...(deps.realpath ? { realpath: deps.realpath } : {}),
       now: deps.now,
       // Catalog loading only consumes `resolved.runtime.command`, never `newerAvailable`.
       // Full PATH discovery probes every candidate launcher (100+ on a dev machine, ~1.2s),
@@ -282,6 +339,39 @@ function bundledRuntimeDeps(deps: BundledCatalogDeps) {
       // selection is identical either way; callers wanting discovery diagnostics opt in.
       discoverAlternatives: deps.discoverAlternatives ?? false,
   };
+}
+
+/**
+ * Candidates for the bundled-catalog probe.
+ *
+ * When discovery finds no Codex CLI it answers with the bare `codex` sentinel, so the probe
+ * asks a command that does not exist while a real CLI sits inside ChatGPT.app. Discovery only
+ * offers that app candidate after classifying the bundle's XML `Info.plist` identity, so a
+ * bundle it cannot classify (a binary plist, or an identity assertion that moved with an app
+ * update) left `ocx connect status` reporting `unverified` on a macOS Child whose only Codex
+ * was the bundled CLI (#8360).
+ *
+ * The known app locations are therefore added after a bare sentinel. This list grants no
+ * trust: every execution still passes the app-bundle signature and ownership gate in
+ * `exec-boundary.ts`, so an unverifiable bundle yields `null` rather than an invented ladder.
+ * Windows needs no entry here because its Codex App install root under LOCALAPPDATA is already
+ * enumerated by `installedCodexCandidates` in `runtime.ts`.
+ */
+function bundledCatalogCandidates(
+  deps: BundledCatalogDeps,
+  resolved: ResolveCodexRuntimeResult | null,
+): string[] {
+  const candidates = deps.commandCandidates?.() ?? [resolved!.runtime.command];
+  // An explicit empty list asks for no probe at all.
+  if (candidates.length === 0) return candidates;
+  if ((deps.platform ?? process.platform) !== "darwin") return candidates;
+  // Decide from the resolver's own result, not from the command's shape: a bare command that ran
+  // (a PATH fallback or a bare CODEX_CLI_PATH) is the operator's runtime, and borrowing the app's
+  // catalog for it would report a ladder that runtime may reject.
+  const selection = resolved?.runtime ?? deps.selectedRuntime;
+  if (!selection || !codexRuntimeIsUnresolved(selection)) return candidates;
+  const exists = deps.existsSync ?? existsSync;
+  return [...candidates, ...macCodexAppCommands(deps).filter(command => exists(command))];
 }
 
 function* bundledCatalogSteps(
@@ -342,7 +432,7 @@ export function loadBundledCodexCatalog(deps: BundledCatalogDeps = {}): Readonly
   const useCache = !deps.commandCandidates && !deps.execFileSync && !deps.execFile && !deps.configDir && !deps.env;
   const resolved = deps.commandCandidates ? null : resolveAndPersistCodexRuntime(bundledRuntimeDeps(deps));
   const inputs = codexRuntimeSelectionIdentity(bundledRuntimeDeps(deps));
-  const steps = bundledCatalogSteps(deps.commandCandidates?.() ?? [resolved!.runtime.command],
+  const steps = bundledCatalogSteps(bundledCatalogCandidates(deps, resolved),
     useCache ? bundledRuntimeKey(resolved!.runtime) : null,
     () => inputs === codexRuntimeSelectionIdentity(bundledRuntimeDeps(deps)));
   let step = steps.next();
@@ -401,13 +491,14 @@ export function loadBundledCodexCatalogAsync(
     const runtimeEpoch = codexRuntimeStateEpoch();
     const current = () => active() && runtimeEpoch === codexRuntimeStateEpoch()
       && flight.inputs === codexRuntimeSelectionIdentity(runtimeDeps);
-    const steps = bundledCatalogSteps(deps.commandCandidates?.() ?? [resolved!.runtime.command],
+    const steps = bundledCatalogSteps(bundledCatalogCandidates(deps, resolved),
       useCache ? bundledRuntimeKey(resolved!.runtime) : null, current, false);
     let step = steps.next();
     while (!step.done) {
       let output: string | null = null;
-      try { output = await runCodexDebugModels(step.value,
-        (file, args, options) => (deps.execFile ?? execCodexFileAsync)(file, args, { ...options, signal: controller.signal }), deps); }
+      try { output = await runCodexDebugModelsAsync(step.value,
+        (file, args, options) => (deps.execFile ?? execCodexFileAsync)(file, args, { ...options, signal: controller.signal }),
+        deps, controller.signal); }
       catch { /* preserve last confirmed evidence on failure */ }
       step = steps.next(output);
     }
@@ -681,11 +772,19 @@ export function readCurrentCodexModelsCache(): RawCatalog | null {
 export function loadCatalogTemplate(): RawEntry | null {
   const catalogPath = readCodexCatalogPath();
   const bundled = bundledCodexCatalogSnapshot();
+  const fromRows = (catalog: RawCatalog | null) => {
+    const template = findSupportedNativeTemplate(catalog
+      ? { ...catalog, models: (catalog.models ?? []).filter(isPlainObject) } : null);
+    // An emitted native has already passed strict normalization. Match that read surface,
+    // including property insertion order, when the native survives only as source evidence.
+    return template && template === retainedNativeInheritanceTemplate(catalog)
+      ? ensureStrictCatalogFields(structuredClone(template)) : template;
+  };
   // Template inheritance only. The validity gates in this file keep `findNativeTemplate`
   // so a catalog carrying only a newly launched native row stays valid (#2813).
-  const native = findSupportedNativeTemplate(readCatalog(catalogPath))
-    ?? findSupportedNativeTemplate(readCatalogBackup(catalogPath))
-    ?? findSupportedNativeTemplate(readCatalog(activeCodexModelsCachePath()))
-    ?? findSupportedNativeTemplate(bundled ? JSON.parse(JSON.stringify(bundled)) as RawCatalog : null);
+  const native = fromRows(readCatalog(catalogPath))
+    ?? fromRows(readCatalogBackup(catalogPath))
+    ?? fromRows(readCatalog(activeCodexModelsCachePath()))
+    ?? fromRows(bundled ? JSON.parse(JSON.stringify(bundled)) as RawCatalog : null);
   return native ? JSON.parse(JSON.stringify(native)) : null;
 }

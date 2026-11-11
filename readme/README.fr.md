@@ -1,20 +1,21 @@
 <p align="center">
-  <img src="../assets/banner.png" alt="opencodex — proxy universel de fournisseurs pour Codex, Claude Code, Claude Desktop et Grok Build" width="100%">
+  <img src="../assets/banner.png" alt="opencodex — une passerelle locale pour Codex, Claude Code, Claude Desktop, Grok Build et plus" width="100%">
 </p>
 
-<h3 align="center">make codex open!</h3>
-<p align="center"><b>Proxy universel de fournisseurs pour OpenAI Codex, Claude Code, Claude Desktop &amp; Grok Build</b><br>
-Deux commandes suffisent pour que chacun d'eux exécute le LLM de votre choix.</p>
+<h3 align="center">Une passerelle locale pour vos outils de programmation IA et vos modèles.</h3>
+<p align="center"><b>Utilisez les modèles de votre choix avec Codex, Claude Code, Claude Desktop et Grok Build,<br>et connectez OpenCode, Pi, Qoder, WorkBuddy, Kilo, Cline, T3 Code et d’autres outils grâce aux configurations gérées.</b><br>
+<a href="https://opencodex.me/fr/reference/client-support/">Voir tous les outils pris en charge →</a></p>
+<p align="center">Fait partie de GOAT : faites tourner vos agents de code sur n'importe quel modèle, sur n'importe quelle machine → <a href="https://trygoat.ai">trygoat.ai</a></p>
 
 <p align="center">
   <a href="https://x.com/claudeebum"><img src="https://img.shields.io/badge/%40claudeebum-000000?logo=x&logoColor=white" alt="Suivre @claudeebum sur X"></a>
   <a href="https://www.npmjs.com/package/@bitkyc08/opencodex"><img src="https://img.shields.io/npm/v/@bitkyc08/opencodex?color=cb3837&label=npm&logo=npm" alt="version npm"></a>
-  <a href="https://github.com/lidge-jun/opencodex/blob/main/LICENSE"><img src="https://img.shields.io/npm/l/@bitkyc08/opencodex?color=blue" alt="licence"></a>
+  <a href="https://github.com/lidge-jun/opencodex/blob/dev/LICENSE"><img src="https://img.shields.io/npm/l/@bitkyc08/opencodex?color=blue" alt="licence"></a>
   <img src="https://img.shields.io/node/v/@bitkyc08/opencodex?logo=node.js&label=node" alt="version de Node">
 </p>
 
 ```bash
-npm install -g @bitkyc08/opencodex
+npm install -g --allow-scripts=bun @bitkyc08/opencodex
 ocx start
 ```
 
@@ -80,20 +81,14 @@ Sol pilote la session et appelle un sous-agent Kimi K3.
   <a href="../README.md">English</a> · <b>Français</b> · <a href="README.ko.md">한국어</a> · <a href="README.zh-CN.md">简体中文</a> · <a href="README.zh-TW.md">繁體中文</a> · <a href="README.ru.md">Русский</a> · <a href="README.ja.md">日本語</a> · <a href="README.tr.md">Türkçe</a> · 📖 <a href="https://opencodex.me/fr/"><b>Documentation complète →</b></a>
 </p>
 
-opencodex est un proxy local léger qui traduit l'API Responses de Codex vers le protocole utilisé
-par votre fournisseur — streaming, appels d'outils, jetons de raisonnement, images, dans les deux
-sens. Utilisez Claude, Gemini, Grok, GLM, DeepSeek, Kimi, Qwen, Ollama ou tout autre LLM avec Codex,
-Claude Code, Claude Desktop et Grok Build. Il peut également gérer un **groupe de comptes ChatGPT**
-pour l'authentification Codex : ajoutez des comptes, actualisez leurs quotas dans le tableau de bord
-et laissez les nouvelles sessions être automatiquement routées vers le compte opérationnel le moins utilisé,
-tandis que les fils existants restent associés au compte qui les a démarrés.
+opencodex est une passerelle locale légère entre vos outils de programmation et vos fournisseurs de modèles. Elle accepte les API Responses, Chat Completions et Anthropic Messages et traduit chaque requête pour votre fournisseur, en prenant en charge le streaming, les appels d’outils, le raisonnement et les images lorsque le client, le modèle et le fournisseur le permettent. Utilisez Claude, Gemini, Grok, GLM, DeepSeek, Kimi, Qwen, Ollama et d’autres fournisseurs avec Codex, Claude Code, Claude Desktop, Grok Build et les outils de la [page des clients pris en charge](https://opencodex.me/fr/reference/client-support/).
 
 ## Démarrage rapide
 
 ### Installation personnelle (CLI)
 
 ```bash
-npm install -g @bitkyc08/opencodex   # Node 18+ ; le runtime Bun est inclus automatiquement
+npm install -g --allow-scripts=bun @bitkyc08/opencodex   # Node 18+ ; le runtime Bun est inclus automatiquement
 ocx start                         # proxy + tableau de bord sur localhost:10100
 ```
 
@@ -103,6 +98,21 @@ Ouvrez **http://localhost:10100** et configurez tout dans le tableau de bord web
 fournisseurs (plus de 40 intégrés, ou n'importe quel point de terminaison compatible OpenAI),
 choisissez les modèles, gérez les comptes. `ocx gui`
 rouvre le tableau de bord à tout moment.
+
+### Connectez votre outil
+
+Connectez l’outil que vous utilisez déjà :
+
+| Outil | Connexion |
+|---|---|
+| Codex | Activez le commutateur Codex sur la page **Connect** du tableau de bord, puis exécutez `codex` comme d’habitude. Sur une écoute locale, cela dirige le fournisseur intégré de Codex vers le proxy. Depuis le terminal, exécutez `ocx init` avant d’ajouter des fournisseurs dans le tableau de bord et acceptez son invite Codex. |
+| Claude Code | Avec le CLI `claude` installé, exécutez `ocx claude`. Il démarre le proxy si nécessaire et lance Claude Code à travers celui-ci. |
+| Claude Desktop | Exécutez `ocx claude desktop`. Lors d’une nouvelle installation, cette commande configure le profil de passerelle pour toute l’application ; une configuration first-party existante est conservée et `ocx claude desktop apply --gateway` permet de changer explicitement. Consultez le [guide Claude Code](https://opencodex.me/fr/guides/claude-code/). Quittez complètement puis rouvrez Claude Desktop après un changement. |
+| Grok Build | Sur une écoute locale avec l’intégration Grok activée, `ocx start` enregistre les modèles lorsque `~/.grok` existe ; choisissez un modèle `ocx-*` dans Grok Build. Pour une configuration distante, consultez le [guide Grok Build](https://opencodex.me/fr/guides/grok-build/). Après avoir ajouté des fournisseurs, redémarrez le proxy (ou lancez `ocx ensure` lorsque le démarrage automatique de Codex est activé) pour actualiser la liste. |
+| Outils avec intégration gérée | Utilisez la page **Connect** du tableau de bord ou `ocx integration client enable --client <id>`. |
+| Tout autre outil | Définissez l’URL de base compatible OpenAI `http://localhost:10100/v1` ou l’URL de base Anthropic `http://localhost:10100`. |
+
+La [page des clients pris en charge](https://opencodex.me/fr/reference/client-support/) indique la méthode de connexion et le protocole de chaque outil.
 
 <details>
 <summary><b>Application de bureau (bêta)</b></summary>
@@ -130,18 +140,6 @@ exige macOS). Le [guide de l'application de bureau](https://opencodex.me/fr/guid
 [`AGENTS_INSTALL.md`](../AGENTS_INSTALL.md#where-things-are-installed) répertorie tout ce qui est écrit sur le disque.
 
 </details>
-
-### Groupe de comptes ChatGPT
-
-opencodex peut également gérer un **groupe de comptes ChatGPT** pour l'authentification Codex. Ajoutez plusieurs
-comptes ChatGPT / Codex et actualisez leurs quotas 5 h / hebdomadaires / 30 j dans le tableau de bord.
-Avec le routage par quota, les nouvelles sessions peuvent utiliser le compte opérationnel le moins sollicité ;
-les modes round-robin et fill-first appliquent leurs propres politiques. Les fils Codex existants restent
-normalement associés au compte qui les a démarrés, afin que les longues sessions SSH, tmux ou connectées
-depuis un appareil mobile ne changent pas de compte en cours de conversation — mais la réévaluation des
-quotas, le basculement, l'exclusion d'un compte, l'expiration de l'association ou la récupération après
-une erreur 401/403 ou 429 peuvent les réassocier. Attribuez un ordre de sélection aux comptes lorsque
-l'un d'eux — généralement votre connexion Codex Desktop — ne doit être utilisé qu'une fois les autres épuisés.
 
 ### Sponsors
 
@@ -204,7 +202,7 @@ services:
   hub:
     pull_policy: build
     build:
-      context: https://github.com/lidge-jun/opencodex.git#main
+      context: https://github.com/lidge-jun/opencodex.git#dev
       dockerfile: Dockerfile
       target: runtime
       args:
@@ -252,7 +250,7 @@ leur arrivée dans le paquet npm.
 <summary>Pour les agents</summary>
 
 ```bash
-npm install -g @bitkyc08/opencodex
+npm install -g --allow-scripts=bun @bitkyc08/opencodex
 ocx start     # ou `ocx service`
 ocx init      # configuration interactive : écrit ~/.opencodex/config.json et relie Codex
 ```
@@ -284,16 +282,6 @@ consultez la [documentation d'installation](https://opencodex.me/fr/getting-star
 
 - **Utilisez n'importe quel LLM avec Codex, Claude Code, Claude Desktop et Grok Build** — plus de 40 fournisseurs prêts à
   l'emploi, chacun conservant sa propre interface native.
-- **Regroupez les comptes ChatGPT** — association aux fils, basculement automatique tenant compte des quotas, période de récupération et
-  gestion de l'authentification en mode fail-closed.
-
-  > **Note sur la politique des fournisseurs :** le regroupement de comptes sert uniquement au routage et à la résilience opérationnelle ; il ne
-  > garantit aucune protection contre les limites de débit, les mesures d'application, les suspensions ou d'autres actions
-  > sur les comptes. OpenCodex n'encourage pas l'utilisation de comptes supplémentaires pour contourner les limites d'un fournisseur, ni le
-  > partage d'identifiants de compte entre personnes. Vous êtes responsable du respect des conditions actuelles de chaque
-  > fournisseur. Consultez le
-  > [guide des groupes de comptes Codex Auth](https://opencodex.me/fr/guides/web-dashboard/)
-  > et les [Conditions d'utilisation actuelles d'OpenAI](https://openai.com/policies/terms-of-use/).
 - **Combos** — un identifiant de modèle virtuel avec basculement ou round-robin pondéré entre fournisseurs. Consultez
   le [guide des combos](https://opencodex.me/fr/guides/combos/).
 - **Des sous-agents sur n'importe quel modèle** — affichez les modèles routés dans le sélecteur de sous-agents de Codex, avec contrôle des surfaces v1/v2 et chaînes de repli. Consultez le
@@ -443,6 +431,33 @@ de l'adresse de bouclage (`"hostname": "0.0.0.0"`) **nécessite** un jeton beare
 sans `OPENCODEX_API_AUTH_TOKEN`, et chaque requête cliente doit le fournir dans
 `x-opencodex-api-key`. Détails : [référence de configuration](https://opencodex.me/fr/reference/configuration/).
 
+## Utilisation avancée
+
+Options auto-hébergées pour les utilisateurs avancés. Vérifiez les conditions de chaque fournisseur avant de les activer.
+
+### Groupe de comptes ChatGPT
+
+opencodex peut également gérer un **groupe de comptes ChatGPT** pour l'authentification Codex. Ajoutez plusieurs
+comptes ChatGPT / Codex et actualisez leurs quotas 5 h / hebdomadaires / 30 j dans le tableau de bord.
+Avec le routage par quota, les nouvelles sessions peuvent utiliser le compte opérationnel le moins sollicité ;
+les modes round-robin et fill-first appliquent leurs propres politiques. Les fils Codex existants restent
+normalement associés au compte qui les a démarrés, afin que les longues sessions SSH, tmux ou connectées
+depuis un appareil mobile ne changent pas de compte en cours de conversation — mais la réévaluation des
+quotas, le basculement, l'exclusion d'un compte, l'expiration de l'association ou la récupération après
+une erreur 401/403 ou 429 peuvent les réassocier. Attribuez un ordre de sélection aux comptes lorsque
+l'un d'eux — généralement votre connexion Codex Desktop — ne doit être utilisé qu'une fois les autres épuisés.
+
+- **Regroupez les comptes ChatGPT** — association aux fils, basculement automatique tenant compte des quotas, période de récupération et
+  gestion de l'authentification en mode fail-closed.
+
+  > **Note sur la politique des fournisseurs :** le regroupement de comptes sert uniquement au routage et à la résilience opérationnelle ; il ne
+  > garantit aucune protection contre les limites de débit, les mesures d'application, les suspensions ou d'autres actions
+  > sur les comptes. OpenCodex n'encourage pas l'utilisation de comptes supplémentaires pour contourner les limites d'un fournisseur, ni le
+  > partage d'identifiants de compte entre personnes. Vous êtes responsable du respect des conditions actuelles de chaque
+  > fournisseur. Consultez le
+  > [guide des groupes de comptes Codex Auth](https://opencodex.me/fr/guides/web-dashboard/)
+  > et les [Conditions d'utilisation actuelles d'OpenAI](https://openai.com/policies/terms-of-use/).
+
 ## Documentation
 
 La documentation publique — installation, fournisseurs, routage, combos, sous-agents, modules complémentaires, intégrations et
@@ -487,7 +502,7 @@ Free code signing provided by [SignPath.io](https://about.signpath.io/), certifi
 
 - Committers and reviewers: [lidge-jun](https://github.com/lidge-jun)
 - Approvers: [lidge-jun](https://github.com/lidge-jun)
-- Privacy: This program will not transfer any information to other networked systems unless specifically requested by the user or the person installing or operating it.
+- Privacy: opencodex sends one anonymous daily usage summary (a per-day install hash that changes daily, version, release channel, platform, install channel, provider kind, coarse model family, active minutes and request, token and error counts; never prompts, model outputs, keys, accounts, hostnames or paths) to telemetry.opencodex.me, and only after the person installing or operating it has seen the notice in the dashboard or an interactive CLI prompt and has not declined. It can be turned off in that notice, in the Windows installer ("Send anonymous usage statistics", checked by default), in Proxy details, or with ocx telemetry disable, OCX_TELEMETRY=0 or DO_NOT_TRACK=1. Only project-wide aggregates of this anonymous data are public. A separate public leaderboard profile is off unless you connect one yourself (dashboard Home or ocx telemetry profile connect); it shares only a chosen handle, display name and colour and your daily request, token and model-family totals, never your anonymous telemetry ID, and disconnecting deletes it. Everything else goes only to the providers and services you configure. See the [telemetry guide](https://opencodex.me/fr/guides/telemetry/).
 
 ## Avis de non-responsabilité
 

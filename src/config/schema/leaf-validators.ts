@@ -13,6 +13,7 @@ import {
   normalizeNonBlankStringArray,
   normalizeAutoReviewModelOverrides,
   modelCapabilitiesConfigError,
+  providerInputModalitiesConfigError,
   contextTierRecordConfigError,
   mergeModelCapabilities,
 } from "../provider-validation";
@@ -28,6 +29,7 @@ import {
   MODEL_ADAPTER_OVERRIDE_ALLOWED,
   pinnedWireAdapter,
   PROVIDER_WEB_SEARCH_BRIDGE_BACKENDS,
+  THINKING_DISPLAY_VALUES,
   UPSTREAM_HTTP_VERSION_VALUES,
   type OcxProviderConfig,
   type OcxConfig,
@@ -300,6 +302,23 @@ const providerNoProxySchema = z.unknown().superRefine((value, ctx) => {
 }).transform(value => value as string | string[] | undefined);
 
 /**
+ * A provider's hosted-tool denial list, validated against a closed vocabulary rather than
+ * accepted as free strings. The provider schema ends in `.passthrough()`, so a misspelled
+ * `web_serch` would otherwise be accepted, persisted, and strip nothing -- leaving the
+ * operator with the upstream 400 the field was set to prevent, and no message saying why
+ * (the `codexToolMode` lesson, #2106).
+ */
+function hostedToolDenialSchema(field: string) {
+  return z.array(z.string().min(1))
+    .transform(normalizeNonBlankStringArray)
+    .refine(
+      tools => tools.every(tool => DECLARABLE_HOSTED_TOOL_TYPES.has(tool)),
+      { message: `${field} accepts only hosted tool types: ${[...DECLARABLE_HOSTED_TOOL_TYPES].join(", ")}` },
+    )
+    .optional();
+}
+
+/**
  * Zod schema for one provider entry: known fields are validated strictly while unknown
  * fields pass through (preserved for runtime extensions).
  */
@@ -310,6 +329,10 @@ export const providerConfigSchema = z.object({
   // Raw diagnostics/writes reject malformed provenance; tolerant loads preserve the custom row.
   anthropicOAuthInstance: z.literal("anthropic2").optional().catch(undefined),
   modelCapabilities: modelCapabilitiesSchema.optional(),
+  inputModalities: z.unknown().superRefine((value, ctx) => {
+    const error = providerInputModalitiesConfigError(value);
+    if (error) ctx.addIssue({ code: "custom", message: error });
+  }).optional().transform(value => value as OcxProviderConfig["inputModalities"]),
   modelContextTiers: z.unknown().superRefine((value, ctx) => {
     const error = contextTierRecordConfigError(value);
     if (error) ctx.addIssue({ code: "custom", message: error });
@@ -347,6 +370,7 @@ export const providerConfigSchema = z.object({
   requiresPairedResponsesToolResults: z.boolean().optional(),
   annotateEmptyToolOutputs: z.boolean().optional(),
   foldDeveloperRoleToSystem: z.boolean().optional(),
+  singleLeadingSystemMessage: z.boolean().optional(),
   fastWire: fastWireSchema.nullable().optional(),
   responseTierAuthoritative: z.boolean().optional(),
   fastEnabled: z.boolean().optional(),
@@ -354,11 +378,17 @@ export const providerConfigSchema = z.object({
   inferContextWindow: z.boolean().optional(),
   modelSupportsServiceTier: z.record(z.string().min(1), z.boolean()).optional(),
   modelSuppressSyntheticMax: z.record(z.string().min(1), z.boolean()).optional(),
+  // Validated against a closed vocabulary here as well as at the write boundaries, so a
+  // hand-edited typo cannot load silently and leave the operator with the built-in display (#8363).
+  thinkingDisplay: z.enum(THINKING_DISPLAY_VALUES).optional(),
+  modelThinkingDisplay: z.record(z.string().min(1), z.enum(THINKING_DISPLAY_VALUES)).optional(),
+  promoteAdditionalTools: z.boolean().optional(),
   preserveResponsesReasoningContent: z.boolean().optional(),
   preserveResponsesInputItemIds: z.boolean().optional(),
   preserveResponsesMessageMetadata: z.boolean().optional(),
   projectResponsesLiteHostedSearchHistory: z.boolean().optional(),
   dropResponsesReasoningItems: z.boolean().optional(),
+  arkKimiResponsesModels: z.array(z.string().min(1)).optional(),
   modelReasoningEffortsAuthoritative: z.boolean().optional(),
   decodesNativeCompactionBlobs: z.boolean().optional(),
   supportsNativeCompactionTrigger: z.boolean().optional(),
@@ -392,21 +422,16 @@ export const providerConfigSchema = z.object({
   retainModels: z.array(z.string().min(1))
     .transform(normalizeNonBlankStringArray)
     .optional(),
+  // Provider-level discovery compatibility (#7910), unrelated to the top-level persisted
+  // `modelDiscovery` state. Degrades to "absent" (strict discovery) like the other default-off
+  // opt-ins; the management write boundary still rejects a malformed block loudly.
+  modelDiscovery: z.object({ skipInvalidRows: z.boolean().optional() }).strict().optional().catch(undefined),
   omitReasoningEffortWithToolsModels: z.array(z.string().min(1))
     .transform(normalizeNonBlankStringArray)
     .optional(),
-  // Validated against a closed vocabulary rather than accepted as free strings. This
-  // schema ends in `.passthrough()`, so a misspelled `web_serch` would otherwise be
-  // accepted, persisted, and strip nothing -- leaving the operator with the upstream 400
-  // the field was set to prevent, and no message saying why (the `codexToolMode` lesson,
-  // #2106).
-  unsupportedHostedTools: z.array(z.string().min(1))
-    .transform(normalizeNonBlankStringArray)
-    .refine(
-      tools => tools.every(tool => DECLARABLE_HOSTED_TOOL_TYPES.has(tool)),
-      { message: `unsupportedHostedTools accepts only hosted tool types: ${[...DECLARABLE_HOSTED_TOOL_TYPES].join(", ")}` },
-    )
-    .optional(),
+  unsupportedHostedTools: hostedToolDenialSchema("unsupportedHostedTools"),
+  // Same closed vocabulary; applied only when the request also declares client tools (#8204).
+  unsupportedHostedToolsWithClientTools: hostedToolDenialSchema("unsupportedHostedToolsWithClientTools"),
   retryOn429: retryOn429PolicySchema.optional(),
   transientRetryOn5xx: transientRetryOn5xxPolicySchema.optional(),
   // Degrades to "absent" like `webSearchBridge`: a malformed hand edit of an opt-in feature
@@ -427,6 +452,7 @@ export const providerConfigSchema = z.object({
     repairInvalidIds: z.boolean().optional(),
   }).strict().optional(),
   responsesSnapshotRepair: z.boolean().optional(),
+  messagePhaseInference: z.boolean().optional(),
   hideRawReasoning: z.boolean().optional(),
   // Invalid blocks degrade to "absent" rather than failing the whole config load: an unusable
   // bridge block must never send an operator through invalid-config recovery for an opt-in
@@ -532,6 +558,7 @@ export function modelPreferHostedToolsConfigError(
     modelAdapters?: unknown;
     baseUrl?: unknown;
     unsupportedHostedTools?: unknown;
+    unsupportedHostedToolsWithClientTools?: unknown;
   },
 ): string | null {
   if (value === undefined) return null;
@@ -545,6 +572,12 @@ export function modelPreferHostedToolsConfigError(
   // request time, so accepting the pair would silently ignore the preference.
   const declaredUnsupported = declaredUnsupportedHostedTools(
     provider as { unsupportedHostedTools?: readonly string[] },
+  );
+  // The conditional list (#8204) denies the same tool whenever client tools travel with it,
+  // which is every Codex turn, so it cancels a preference just as surely.
+  const declaredWithClientTools = declaredUnsupportedHostedTools(
+    provider as { unsupportedHostedTools?: readonly string[]; unsupportedHostedToolsWithClientTools?: readonly string[] },
+    true,
   );
   // Effective transport: a `preserveCustomDestination` registry row reused under a
   // different endpoint keeps its own adapter AND its own auth at runtime, because
@@ -608,6 +641,9 @@ export function modelPreferHostedToolsConfigError(
       }
       if (declaredUnsupported.has(tool)) {
         return `${field}.${key} cannot prefer ${tool}: unsupportedHostedTools declares it unsupported`;
+      }
+      if (declaredWithClientTools.has(tool)) {
+        return `${field}.${key} cannot prefer ${tool}: unsupportedHostedToolsWithClientTools declares it unsupported`;
       }
       if (isHostedToolUnsupportedForModel(key, tool)) {
         return `${field}.${key} cannot prefer ${tool}: the model does not support it`;
@@ -843,6 +879,26 @@ export const clientIntegrationsSchema = z.object({
   "claude-desktop": z.boolean().optional().catch(undefined),
 }).passthrough();
 
+/**
+ * Opt-in opencode-side request timeouts emitted into the generated opencode provider block.
+ * Each field is a positive millisecond count or the literal `false` (disable that wait). A
+ * malformed per-field value degrades to undefined (the field is dropped and opencode keeps its
+ * native default) rather than rejecting the whole config or emitting an opencode config that
+ * opencode would refuse to load. `.passthrough()` keeps a forward-compatible key a later version
+ * might add.
+ */
+const opencodeClientExportTimeout = z.union([z.number().positive().finite(), z.literal(false)]);
+export const opencodeClientExportSchema = z.object({
+  headerTimeoutMs: opencodeClientExportTimeout.optional().catch(undefined),
+  chunkTimeoutMs: opencodeClientExportTimeout.optional().catch(undefined),
+  timeoutMs: opencodeClientExportTimeout.optional().catch(undefined),
+}).passthrough();
+
+/** omo dialect: an unknown value is dropped so the export falls back to the Chat default. */
+export const omoClientExportSchema = z.object({
+  api: z.enum(["openai-completions", "openai-responses"]).optional().catch(undefined),
+}).passthrough();
+
 export const asideProfileSyncSchema = z.object({
   allProfiles: z.boolean().optional(),
   profiles: z.record(
@@ -1017,6 +1073,7 @@ export const clientConnectionSchema = z.object({
 export const codexPoolSchema = z.object({
   excludedPlans: z.array(z.string().trim().min(1)).optional(),
   startIdleWindows: z.boolean().optional(),
+  requestOwnedAffinity: z.boolean().optional(),
   lowQuotaProtection: z.object({
     enabled: z.boolean(),
     threshold: z.number().finite().min(1).max(100),
@@ -1159,4 +1216,15 @@ export const spendSchema = z.object({
  */
 export const skillsConfigSchema = z.object({
   catalog_refresh: z.enum(["per_session", "per_turn"]).optional(),
+}).strict();
+
+/**
+ * Anonymous telemetry consent state.
+ *
+ * No endpoint is accepted here: the collector URL is a constant in src/telemetry/sender.ts.
+ */
+export const telemetryConfigSchema = z.object({
+  decision: z.enum(["accepted", "declined"]).optional(),
+  decidedAt: clientTimestampSchema.optional(),
+  noticeShownAt: clientTimestampSchema.optional(),
 }).strict();

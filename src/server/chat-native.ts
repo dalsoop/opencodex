@@ -1,3 +1,8 @@
+import { recordUpstreamProviderErrorDetail } from "./request-log-failure-detail";
+import { normalizeNativeChatContent } from "../adapters/openai-chat/native-content";
+import { attachComboFailureEvidence, ownedChatErrorPayload, type ClientErrorContract } from "../lib/client-error-body";
+import type { FailureVerdictSink } from "../chat/failure-verdict";
+import { normalizeChatChoiceErrors } from "./chat-native-sse";
 import { captureAccountAutoPauseAttempt, wasAccountAutoPaused } from "../oauth/account-auto-pause";
 import { createPhysicalSendReporter } from "../lib/request-execution-budget";
 import { createInferenceSendBudget } from "./inference/context";
@@ -7,6 +12,7 @@ import type { AdapterRequest, ProviderAdapter } from "../adapters/base";
 import { isNativeChatRouteEligible } from "./chat-native-eligibility";
 import {
   chatCompletionsErrorBody,
+  ChatCompletionsCollectorSource,
   chatCompletionsErrorResponse,
   collectChatCompletion,
   isChatCompletionsStreamError,
@@ -24,31 +30,29 @@ import {
 } from "../lib/errors";
 import { reportDispatchSends, type RequestExecutionBudget, type SingleUseDispatchPermit } from "../lib/request-execution-budget";
 import type { AdmissionLease } from "../lib/admission";
+import { resolveContextPrincipal, type DataPlaneAdmission } from "./auth-cors";
 import { readBoundedResponseBody } from "../lib/bounded-body";
 import { redactSecretString } from "../lib/redact";
-import { resolveClientRetryAfter } from "../lib/retry-after";
+import { formatClientRetryAfter, resolveClientRetryAfter } from "../lib/retry-after";
 import {
   applyUpstreamRecoveryInit,
   fetchWithResetRetry,
   fetchWithTransientRetry,
-  isNonReplayableResponse,
+  isNonReplayableResponse, isSameTargetRetryHold,
   isReplayRefusalCode,
   isReplayRefusalResponse,
   prepareSameTarget429Wait,
   REPLAY_REFUSAL_CLIENT_HEADERS,
   REPLAY_REFUSED_STATUS,
   retainReplayRefusal,
-  SendBudgetExhaustedError,
+  SendBudgetExhaustedError, errorDestinationLabel,
   TRANSIENT_RETRY_MAX_ATTEMPTS,
   UpstreamRetryEvidenceError,
   type UpstreamSendRecovery,
   UPSTREAM_RESET_REPLAY_REFUSED_CODE,
   wrapWithZeroOutputRefetch,
 } from "../lib/upstream-retry";
-import {
-  isTranslatorBudgetExceededError,
-  type TranslatorBudget,
-} from "../lib/translator-budget";
+import { isTranslatorBudgetExceededError, type TranslatorBudget } from "../lib/translator-budget";
 import { authorizeResendForRecovery } from "../lib/request-resend-gate";
 import { ambiguousResendAllowanceFor, selfContainedChatBody } from "./responses/reset-replay";
 import {
@@ -64,12 +68,14 @@ import { fastPolicyForModel } from "../providers/service-tier";
 import { RequestPacingQueueOverloadError } from "../providers/request-pacing";
 import { stampApiKeyAccountLabel } from "../providers/label";
 import { distributedKeyPhysicalFetch, distributedKeyResponseOwner } from "../providers/api-key-response-ownership";
+import { isProviderApiKeyPaused, ProviderApiKeyPausedError } from "../providers/api-key-pause";
 import { providerApiKeySelectionIsCurrent, resolveCurrentProviderApiKeyTransport } from "../providers/api-key-selection";
 import type { OcxProviderTransport } from "../providers/xai-transport";
 import type { RouteResult } from "../router";
 import type { OcxConfig, OcxProviderConfig } from "../types";
 import { fetchWithHeaderTimeout, physicalSendObserverInit, providerFetch, safeHostLabel, sendWithConnectionPolicy } from "./responses/fetch-helpers";
 import { isLocalUpstream } from "../lib/local-upstream";
+import { resolveConnectTimeoutMs, resolveJsonBodyReadTimeoutMs } from "../stall-timeout";
 import { linkAbortSignal } from "./responses";
 import {
   noteProviderAttemptSend,
@@ -84,10 +90,12 @@ import { beginInferenceAttempt, type InferenceAttempt } from "./inference/attemp
 import { createFinalRequestLog } from "./inference/final-log";
 import { registerTurn, unregisterTurn } from "./lifecycle";
 import { attachRequestSpendTracker } from "./responses/request-spend";
-import { workflowRefusalResponse } from "./workflow-refusal";
+import { workflowRefusalResponse, workflowSendCeilingRefusalResponse } from "./workflow-refusal";
 import type { ComboProtocolSource } from "./responses/core-combo-native";
 import type { ProtocolEnvelope } from "../protocols/envelope";
+import { protocolTraceSuppressed } from "../protocols/trace";
 import { nativeChatReplayScope, bindNativeChatReplayScope, nativeChatReasoningCapture } from "./chat-native-reasoning";
+import { resolveMistralTransport } from "../providers/mistral-transport";
 
 export { isNativeChatRouteEligible, nativeChatDeclineReason } from "./chat-native-eligibility";
 
@@ -181,7 +189,7 @@ export interface HandleNativeChatOptions {
   req: Request;
   config: OcxConfig;
   logCtx: RequestLogContext;
-  logIds?: { requestId: string; start: number; turnAdmissionLease?: AdmissionLease };
+  logIds?: { requestId: string; start: number; turnAdmissionLease?: AdmissionLease; admission?: DataPlaneAdmission };
   route: RouteResult;
   chatBody: Rec;
   requestedModel: string;
@@ -207,10 +215,18 @@ export interface NativeChatExecution extends HandleNativeChatOptions {
    */
   sendBudget?: RequestExecutionBudget;
   comboDispatchPermit?: SingleUseDispatchPermit;
+  /** The shared observer records a Combo child's refusal on its parent's context. */
+  workflowRefusalContext?: Pick<RequestLogContext, "localTerminalReason">;
   /** Replaces the request-relative first-output mark; a combo child records its own. */
   onFirstOutput?: () => void;
   /** The lease a streamed body holds; defaults to `logIds.turnAdmissionLease`. */
   turnAdmissionLease?: AdmissionLease;
+  /**
+   * The request's resolved data-plane admission, when the caller carries it without `logIds`.
+   * A combo child runs on the parent's log row, so it receives the admitted identity here or
+   * its reasoning replay scope can never establish a caller principal (PF-07).
+   */
+  admission?: DataPlaneAdmission;
 }
 
 /**
@@ -219,7 +235,7 @@ export interface NativeChatExecution extends HandleNativeChatOptions {
  */
 export async function handleNativeChatCompletions(options: HandleNativeChatOptions): Promise<Response> {
   const { logCtx, logIds, route } = options;
-  logCtx.inboundProtocol = "chat";
+  if (!protocolTraceSuppressed(logCtx)) logCtx.inboundProtocol = "chat";
   const attemptHandle = beginInferenceAttempt(logCtx, {
     provider: route.providerName,
     model: route.modelId,
@@ -248,6 +264,9 @@ export function createNativeChatComboSource(input: {
   requestedModel: string;
   requestedStream: boolean;
   translatorBudget: TranslatorBudget;
+  workflowRefusalContext?: Pick<RequestLogContext, "localTerminalReason">;
+  /** The request's data-plane admission; native children inherit it for replay scope. */
+  admission?: DataPlaneAdmission;
 }): ComboProtocolSource {
   return {
     inbound: "chat",
@@ -264,8 +283,10 @@ export function createNativeChatComboSource(input: {
       finishLog: child.finishLog,
       sendBudget: child.sendBudget,
       comboDispatchPermit: child.comboDispatchPermit,
+      workflowRefusalContext: input.workflowRefusalContext,
       onFirstOutput: child.onFirstOutput,
       ...(child.turnAdmissionLease ? { turnAdmissionLease: child.turnAdmissionLease } : {}),
+      ...(input.admission ? { admission: input.admission } : {}),
     }, child.attemptHandle),
   };
 }
@@ -290,10 +311,20 @@ export async function runNativeChatAttempt(
   const notifyFirstOutput = execution.onFirstOutput
     ?? (logIds ? () => recordFirstOutput(logCtx, logIds.start) : undefined);
   const onFirstOutput = () => { outputDelivered = true; notifyFirstOutput?.(); };
-  const fail = (status: number, message: string, type?: string, code?: string | null): Response => {
+  const failLocal = (status: number, message: string, type?: string, code?: string | null): Response => {
     const safeMessage = redactSecretString(message);
     finishLog(status, safeMessage);
     return chatCompletionsErrorResponse(status, safeMessage, type, code);
+  };
+
+  const failUpstream = (status: number, message: string, type?: string, code?: string | null, contract?: ClientErrorContract): Response => {
+    const legacy = chatCompletionsErrorBody(status, redactSecretString(message), type, code);
+    finishLog(status, redactSecretString(message));
+    const error = legacy.error as { type: string; code: string | null };
+    const finalStatus = error.code === CYBER_POLICY_ERROR_CODE ? 400 : status;
+    return attachComboFailureEvidence(new Response(JSON.stringify(ownedChatErrorPayload({ status: finalStatus, type: error.type, code: error.code, contract,
+      evidence: { status, type, code: code ?? undefined, message } })),
+      { status: finalStatus, headers: { "Content-Type": "application/json" } }), JSON.stringify(legacy));
   };
 
   normalizePinnedChatEffort(execution);
@@ -318,7 +349,8 @@ export async function runNativeChatAttempt(
     streamTurnRegistered = false;
     unregisterTurn(upstream);
   };
-  const connectMs = config.connectTimeoutMs ?? 200_000;
+  // Set only at the final send boundary; queued refresh can replace the destination.
+  let localUpstream = false;
   // Native chat is its own entry path -- chat-completions.ts routes here directly and never
   // through the Responses core -- so the pre-dispatch key preference is applied again here
   // rather than inherited. Assigned before the adapter binds below, for the same reason it is
@@ -328,20 +360,27 @@ export async function runNativeChatAttempt(
   try {
     const proactiveKeyProvider = selectProactiveApiKeyTransport(config, route.providerName, route.provider);
     if (proactiveKeyProvider) route.provider = proactiveKeyProvider;
+    if (isProviderApiKeyPaused(route.provider)) throw new ProviderApiKeyPausedError();
   } catch (error) {
     cleanupAbort(); upstream.abort();
+    if (error instanceof ProviderApiKeyPausedError) {
+      return failLocal(403, error.message, "permission_error");
+    }
     if (!(error instanceof RequestPacingQueueOverloadError)) throw error;
-    const refusal = fail(429, error.message, "rate_limit_error");
-    refusal.headers.set("Retry-After", String(error.retryAfterSeconds));
+    const refusal = failLocal(429, error.message, "rate_limit_error");
+    const advice = formatClientRetryAfter(error.retryAfterSeconds);
+    if (advice !== undefined) refusal.headers.set("Retry-After", advice);
     return refusal;
   }
-  let activeProvider: OcxProviderConfig = route.provider;
+  // Key selection re-resolves the transport; a single-key route still needs canonical Mistral pacing.
+  let activeProvider: OcxProviderConfig = resolveMistralTransport(route.provider);
   stampApiKeyAccountLabel(logCtx, route.providerName, activeProvider);
   const spendTracker = sendBudget ? undefined : attachRequestSpendTracker(req, logCtx);
   const physicalBudget = sendBudget ?? createInferenceSendBudget(req, logCtx);
   let activeAdapter: ProviderAdapter = createOpenAIChatAdapter(activeProvider);
   let activeRequest: AdapterRequest;
-  const replayScope = nativeChatReplayScope(req.headers);
+  const replayScope = nativeChatReplayScope(req.headers,
+    resolveContextPrincipal(req, config, execution.admission ?? logIds?.admission));
   let retainedRequestBytes = 0;
   const releaseRetainedRequest = () => {
     if (retainedRequestBytes === 0) return;
@@ -365,6 +404,8 @@ export async function runNativeChatAttempt(
       config.fastMode,
       route.providerName,
       replayScope,
+      undefined,
+      translatorBudget,
     );
     observeAdvisorNativeReasoning(req.headers, logCtx, request.body);
     return request;
@@ -377,9 +418,9 @@ export async function runNativeChatAttempt(
     cleanupAbort();
     upstream.abort();
     if (isTranslatorBudgetExceededError(error)) {
-      return fail(413, "request translation buffer exceeded the safe limit", "request_too_large", "translation_buffer_limit");
+      return failLocal(413, "request translation buffer exceeded the safe limit", "request_too_large", "translation_buffer_limit");
     }
-    return fail(400, error instanceof Error ? error.message : String(error), "invalid_request_error");
+    return failLocal(400, error instanceof Error ? error.message : String(error), "invalid_request_error");
   }
 
   // One inbound request owns one transient send allowance. Capture the policy before any
@@ -438,12 +479,12 @@ export async function runNativeChatAttempt(
       // Backstop for sends the helper cannot see coming (a reset replay). The first
       // report settles the combo's booking; each later one is charged and booked.
       if (physicalSends > 0 && sendBudget.remainingBaseSends(sharedSendCap) <= 0) {
-        throw new SendBudgetExhaustedError(safeHostLabel(url));
+        throw new SendBudgetExhaustedError(errorDestinationLabel(url));
       }
       physicalSends += 1;
-      reportDispatchSends(sendBudget, 1, execution.comboDispatchPermit);
+      reportDispatchSends(sendBudget, 1, execution.comboDispatchPermit, true);
       initialSendStarted = true;
-    } else if (!spendTracker?.charge()) throw new NativeChatSpendRefusal();
+    } else if (!spendTracker?.charge({ workflowAlreadyCounted: true })) throw new NativeChatSpendRefusal();
   };
 
   let responseOwnsDistributedKey = true;
@@ -456,7 +497,7 @@ export async function runNativeChatAttempt(
       // #2643: opted-in key-auth openai-chat providers retry pre-stream transient statuses on
       // the native chat lane too; everyone else keeps reset-only semantics.
       const remaining = remainingTransientSends();
-      if (sendBudget && remaining <= 0) throw new SendBudgetExhaustedError(safeHostLabel(request.url));
+      if (sendBudget && remaining <= 0) throw new SendBudgetExhaustedError(errorDestinationLabel(request.url));
       if (requestTransientPolicy && remaining <= 0) {
         throw new Error("native Chat transient send budget exhausted before recovery dispatch");
       }
@@ -471,7 +512,7 @@ export async function runNativeChatAttempt(
             body: request.body,
           }, effectiveRecovery),
           upstream.signal,
-          connectMs,
+          0, // Final physical send owns the header clock after queued credential/destination refresh.
           requestedStream,
           providerFetch(activeProvider, undefined, {
             providerName: route.providerName,
@@ -490,6 +531,7 @@ export async function runNativeChatAttempt(
                   if (fresh) current = selectProactiveApiKeyTransport(config, route.providerName, fresh) ?? fresh;
                 }
                 if (!current || !isNativeChatRouteEligible({ ...route, provider: current }, execution.chatBody, config)) {
+                  if (!current && isProviderApiKeyPaused(config.providers[route.providerName])) throw new ProviderApiKeyPausedError();
                   throw new Error("Provider key selection is no longer available for native Chat");
                 }
                 activeProvider = current;
@@ -533,19 +575,21 @@ export async function runNativeChatAttempt(
                 noteProviderAttemptSend(logCtx, route.providerName, activeProvider, logCtx.usageLogInputTokens, transportRecovery ?? recovery);
                 // A reselected provider transport is still a physical send: the connection policy
                 // and manual-redirect ownership wrap the selected implementation (#4992).
-                dispatched = await sendWithConnectionPolicy(
+                const physicalFetch = ((input, physicalInit) => sendWithConnectionPolicy(
                   distributedKeyPhysicalFetch((activeProvider as OcxProviderTransport).fetch ?? execute,
                     route.providerName, activeProvider, request.url),
+                  String(input), physicalInit, { providerName: route.providerName, provider: activeProvider },
+                )) as typeof fetch;
+                localUpstream = isLocalUpstream(request.url);
+                dispatched = await fetchWithHeaderTimeout(
                   request.url,
                   applyUpstreamRecoveryInit({
                     ...init, method: request.method, headers, body: request.body,
                     ...physicalSendObserverInit(observeAutoPause, request.url),
                   }, transportRecovery),
-                  // Reselection can replace the provider transport and the wire shape, so the
-                  // egress route is bound to the provider this send actually uses. Omitting it
-                  // here would let a provider transport bypass its configured route entirely,
-                  // because that transport wins over the executor that carries the binding.
-                  { providerName: route.providerName, provider: activeProvider },
+                  init.signal ?? upstream.signal,
+                  resolveConnectTimeoutMs(config.connectTimeoutMs, { localUpstream }),
+                  requestedStream, physicalFetch,
                 );
               } finally {
                 try { if (physicalBudget.spendEnforced) spendReport(1); }
@@ -568,7 +612,7 @@ export async function runNativeChatAttempt(
         dispatch,
         {
           abortSignal: upstream.signal,
-          label: safeHostLabel(request.url),
+          label: safeHostLabel(request.url), destination: errorDestinationLabel(request.url),
           ...(requestTransientPolicy
             ? {
               attempts: remaining,
@@ -610,7 +654,7 @@ export async function runNativeChatAttempt(
       // limit: waiting and re-sending here is exactly the duplicate inference the refusal
       // exists to stop. It kept the same shape under the old 502 only because 502 never
       // matched this branch.
-      && !isNonReplayableResponse(response)
+      && !isNonReplayableResponse(response) && !isSameTargetRetryHold(response)
       && retryPolicy
       && retries < retryPolicy.attempts
       && transientSendAvailable()
@@ -659,26 +703,34 @@ export async function runNativeChatAttempt(
     releaseRetainedRequest();
     cleanupAbort();
     upstream.abort();
-    if (req.signal.aborted) return fail(499, "Client cancelled request", "client_cancelled");
+    if (req.signal.aborted) return failLocal(499, "Client cancelled request", "client_cancelled");
     const sendError = error instanceof UpstreamRetryEvidenceError ? error.cause : error;
+    if (sendError instanceof ProviderApiKeyPausedError) {
+      return failLocal(403, sendError.message, "permission_error");
+    }
     if (sendError instanceof RequestPacingQueueOverloadError) {
-      const refusal = fail(429, sendError.message, "rate_limit_error");
-      refusal.headers.set("Retry-After", String(sendError.retryAfterSeconds));
+      const refusal = failLocal(429, sendError.message, "rate_limit_error");
+      const advice = formatClientRetryAfter(sendError.retryAfterSeconds);
+      if (advice !== undefined) refusal.headers.set("Retry-After", advice);
       return refusal;
     }
     if (sendError instanceof SendBudgetExhaustedError) {
+      const refusal = workflowSendCeilingRefusalResponse(logCtx, req.headers.get("x-codex-parent-thread-id")?.trim() || undefined,
+        execution.workflowRefusalContext);
+      if (refusal) { finishLog(429); return refusal; }
       // A decision this process made, answered as the Responses path answers it: 429, not 502.
-      return fail(429, sendError.message, SEND_BUDGET_EXHAUSTED_CODE, SEND_BUDGET_EXHAUSTED_CODE);
+      return failLocal(429, sendError.message, SEND_BUDGET_EXHAUSTED_CODE, SEND_BUDGET_EXHAUSTED_CODE);
     }
     if (sendError instanceof NativeChatSpendRefusal) {
-      const refusal = workflowRefusalResponse("workflow-spend-exhausted", logCtx);
+      const refusal = workflowRefusalResponse(logCtx.errorCode === "workflow_sends_exhausted"
+        ? "workflow-sends-exhausted" : "workflow-spend-exhausted", logCtx);
       finishLog(429);
       return refusal;
     }
     if (isTranslatorBudgetExceededError(error)) {
-      return fail(413, "request translation buffer exceeded the safe limit", "request_too_large", "translation_buffer_limit");
+      return failLocal(413, "request translation buffer exceeded the safe limit", "request_too_large", "translation_buffer_limit");
     }
-    return fail(502, error instanceof Error ? error.message : String(error), "server_error");
+    return failUpstream(502, error instanceof Error ? error.message : String(error), "server_error", undefined, "transport_failed");
   }
   releaseRetainedRequest();
 
@@ -694,7 +746,7 @@ export async function runNativeChatAttempt(
     cleanupAbort();
     if (req.signal.aborted) {
       upstream.abort();
-      return fail(499, "Client cancelled request", "client_cancelled");
+      return failLocal(499, "Client cancelled request", "client_cancelled");
     }
     const detail = activeAdapter.formatErrorBody?.(response.status, response.headers, bodyText) ?? "";
     let upstreamType: string | undefined;
@@ -702,6 +754,7 @@ export async function runNativeChatAttempt(
     let upstreamMessage: string | undefined;
     try {
       const parsedError = JSON.parse(bodyText) as Rec;
+      recordUpstreamProviderErrorDetail(logCtx, response.status, parsedError);
       const nested = isRec(parsedError.error) ? parsedError.error : undefined;
       const details = nested ?? parsedError;
       if (typeof details.type === "string") upstreamType = details.type;
@@ -756,14 +809,17 @@ export async function runNativeChatAttempt(
         upstreamRetryAfter: response.headers.get("retry-after"),
       });
     finishLog(status, classified.message);
-    const rewritten = new Response(JSON.stringify(chatCompletionsErrorBody(status, classified.message, classified.type, classified.code)), {
+    const rewritten = new Response(JSON.stringify(ownedChatErrorPayload({ status, type: classified.type, code: classified.code,
+      evidence: { status: response.status, type: upstreamType, code: upstreamCode ?? undefined, message: upstreamMessage ?? detail },
+      localReason: wasAccountAutoPaused(response) ? "credentials_paused" : undefined })), {
       status,
       headers: {
         "Content-Type": "application/json",
-        ...(retryAfter ? { "Retry-After": retryAfter } : {}),
+        ...(formatClientRetryAfter(retryAfter) ? { "Retry-After": formatClientRetryAfter(retryAfter)! } : {}),
         ...(replayRefusal ? REPLAY_REFUSAL_CLIENT_HEADERS : {}),
       },
     });
+    attachComboFailureEvidence(rewritten, JSON.stringify(chatCompletionsErrorBody(status, classified.message, classified.type, classified.code)));
     return replayRefusal ? retainReplayRefusal(rewritten) : rewritten;
   }
 
@@ -786,7 +842,7 @@ export async function runNativeChatAttempt(
       },
       {
         abortSignal: upstream.signal,
-        label: safeHostLabel(activeRequest.url),
+        label: safeHostLabel(activeRequest.url), destination: errorDestinationLabel(activeRequest.url),
         attempts: remainingTransientSends(),
         // The origin returned a head and may already be running the turn, so this is the
         // ambiguous row of the stage table. Only the operator allowance the Responses stream
@@ -799,12 +855,17 @@ export async function runNativeChatAttempt(
           (replacement.headers.get("content-type") ?? "").toLowerCase().includes("text/event-stream"),
       },
     );
+    const failureVerdictSink: FailureVerdictSink = {};
+    const collectorSource = requestedStream ? undefined : new ChatCompletionsCollectorSource(translatorBudget);
     const stream = nativeChatSse(resilientBody, {
+      provider: activeProvider,
+      failureVerdictSink,
+      collectorSource,
       requestedModel,
       translatorBudget,
       signal: upstream.signal,
       stallTimeoutSec: config.stallTimeoutSec,
-      localUpstream: isLocalUpstream(activeProvider.baseUrl),
+      localUpstream,
       clientDeclaredEmptyToolCatalog,
       declaredLegacyFunctionNames,
       onFirstOutput,
@@ -851,13 +912,13 @@ export async function runNativeChatAttempt(
       });
     }
     try {
-      const completion = await collectChatCompletion(stream, requestedModel, translatorBudget);
+      const completion = await collectChatCompletion(stream, requestedModel, translatorBudget, failureVerdictSink, collectorSource);
       cleanupAbort();
       // A cancelled native relay closes its downstream body. EOF alone must not
       // promote the buffered prefix to a successful Chat completion. A terminal
       // already accepted by the relay retains precedence over a later abort.
       if (req.signal.aborted && terminalStatus === undefined) {
-        return fail(499, "Client cancelled request", "client_cancelled");
+        return failLocal(499, "Client cancelled request", "client_cancelled");
       }
       finishLog(200);
       return Response.json(completion);
@@ -865,54 +926,57 @@ export async function runNativeChatAttempt(
       cleanupAbort();
       upstream.abort();
       if (req.signal.aborted && terminalStatus === undefined) {
-        return fail(499, "Client cancelled request", "client_cancelled");
+        return failLocal(499, "Client cancelled request", "client_cancelled");
       }
       if (isChatCompletionsStreamError(error)) {
-        return fail(error.status, error.message, error.type, error.code);
+        return failUpstream(error.status, error.message, error.type, error.code);
       }
-      return fail(502, error instanceof Error ? error.message : String(error), "upstream_error");
+      return failUpstream(502, error instanceof Error ? error.message : String(error), "upstream_error", undefined, "transport_failed");
     }
   }
 
   let body;
   try {
+    const jsonBodyReadMs = resolveJsonBodyReadTimeoutMs(config.stallTimeoutSec, { localUpstream }, config.connectTimeoutMs);
     body = await readBoundedResponseBody(response, {
       signal: upstream.signal,
       maxBytes: MAX_NATIVE_CHAT_JSON_BYTES,
-      totalTimeoutMs: Math.max(connectMs, 5_000),
-      inactivityTimeoutMs: Math.max(connectMs, 5_000),
+      totalTimeoutMs: localUpstream ? 0 : jsonBodyReadMs,
+      inactivityTimeoutMs: jsonBodyReadMs,
     });
   } catch (error) {
     cleanupAbort();
     upstream.abort();
-    if (req.signal.aborted) return fail(499, "Client cancelled request", "client_cancelled");
-    return fail(502, error instanceof Error ? error.message : String(error), "upstream_error");
+    if (req.signal.aborted) return failLocal(499, "Client cancelled request", "client_cancelled");
+    return failUpstream(502, error instanceof Error ? error.message : String(error), "upstream_error", undefined, "transport_failed");
   }
   cleanupAbort();
   if (body.oversized) {
     upstream.abort();
-    return fail(502, "upstream response exceeded the safe limit", "upstream_error", "translation_buffer_limit");
+    return failUpstream(502, "upstream response exceeded the safe limit", "upstream_error", "translation_buffer_limit");
   }
   let parsedJson: unknown;
   try {
     parsedJson = JSON.parse(body.text);
   } catch {
-    return fail(502, "upstream returned malformed Chat Completions JSON", "upstream_error");
+    return failUpstream(502, "upstream returned malformed Chat Completions JSON", "upstream_error");
   }
-  const error = structuredError(parsedJson);
-  if (error) return fail(error.status ?? 502, error.message, error.type, error.code);
-  const completion = chatCompletionJson(parsedJson);
-  if (!completion) return fail(502, "upstream response contained no choices", "upstream_error");
-  reasoningCapture.json(completion);
-  const usage = usageFromChat(completion.usage);
+  const usage = isRec(parsedJson) ? usageFromChat(parsedJson.usage) : undefined;
   if (usage) {
     if (!recordKeyWireAttemptUsage(logCtx, usage)) {
       logCtx.usage = usage;
       attempt.usage = usage;
     }
   }
+  if (isRec(parsedJson)) parsedJson = normalizeNativeChatContent(parsedJson, activeProvider);
+  const error = structuredError(parsedJson);
+  if (error) return failUpstream(error.status ?? 502, error.message, error.type, error.code);
+  const originalCompletion = chatCompletionJson(parsedJson);
+  const completion = originalCompletion ? normalizeChatChoiceErrors(originalCompletion) : null;
+  if (!completion) return failUpstream(502, "upstream response contained no choices", "upstream_error");
+  reasoningCapture.json(completion);
   if (clientDeclaredEmptyToolCatalog && chatResponseHasUndeclaredToolCalls(completion, declaredLegacyFunctionNames)) {
-    return fail(502, UNDECLARED_CHAT_TOOL_MESSAGE, "upstream_error", UNDECLARED_TOOL_CALL_ERROR_CODE);
+    return failUpstream(502, UNDECLARED_CHAT_TOOL_MESSAGE, "upstream_error", UNDECLARED_TOOL_CALL_ERROR_CODE);
   }
   onFirstOutput?.();
   try {
@@ -929,7 +993,7 @@ export async function runNativeChatAttempt(
     });
   } catch (error) {
     if (isTranslatorBudgetExceededError(error)) {
-      return fail(502, "upstream translation buffer exceeded the safe limit", "upstream_error", "translation_buffer_limit");
+      return failUpstream(502, "upstream translation buffer exceeded the safe limit", "upstream_error", "translation_buffer_limit");
     }
     throw error;
   }

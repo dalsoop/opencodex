@@ -1,4 +1,6 @@
 import type { VendorContextInference } from "./vendor-context";
+import { retainedNativeInheritanceTemplate } from "./native-template";
+export { findSupportedNativeTemplate } from "./native-template";
 import { isCodexControlPlaneModel } from "../control-plane-models";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -104,6 +106,10 @@ export interface CatalogModel {
   description?: string;
   owned_by?: string;
   reasoningEfforts?: string[];
+  supportsReasoning?: boolean;
+  supportsThinkingToggle?: boolean;
+  supportsReasoningEffort?: boolean;
+  defaultThinkingEnabled?: boolean;
   /** Exact CCA family evidence, retained through the in-memory discovery cache. */
   antigravityEffortWireModelIds?: Partial<Record<"low" | "medium" | "high", string>>;
   /** Suppress only catalog synthesis of a missing max rung; provider-declared max survives. */
@@ -133,6 +139,8 @@ export interface CatalogModel {
   supportsServiceTier?: boolean;
   /** Captured eligible service-tier wire explicitly maps ultrafast to ultrafast. */
   supportsUltraFastTier?: boolean;
+  /** Explicitly verified exact Flex wire and foreign caller-tier forwarding on this route. */
+  supportsFlexTier?: boolean;
   /** Optional provider-specific copy for the advertised Fast tier. */
   fastTierDescription?: string;
   supportsReasoningSummaries?: boolean;
@@ -184,15 +192,11 @@ export const ROUTED_MODEL_COMPATIBILITY_EXCLUSIONS = new Set([
   "opencode-go/mimo-v2-omni",
   "opencode-go/mimo-v2-pro",
   /*
-   * DeepSeek retired `deepseek-v4-pro` on 2026-09-14 04:00 UTC and routes its requests to
-   * V4.1-Flash (api-docs.deepseek.com/news/news260910). Deleting the registry rows removes
-   * the model on providers that publish a static roster, but every provider below discovers
-   * its models live — there, a deleted row does not remove anything, it only strips the
-   * context window, the effort ladder and the text-only hint, so the retired model would
-   * keep appearing with its capabilities broken. Excluding the slug is what actually takes
-   * it out of the routed catalog.
+   * These third-party exclusions originated in the superseded V4 Pro retirement plan.
+   * First-party service continues (api-docs.deepseek.com/updates/); these gateway routes
+   * remain excluded pending provider-specific verification. Live discovery can reintroduce
+   * a model removed from a static registry, so these exclusions act on the routed catalog.
    */
-  "deepseek/deepseek-v4-pro",
   "opencode-go/deepseek-v4-pro",
   "command-code/deepseek-deepseek-v4-pro",
   "commandcode/deepseek-deepseek-v4-pro",
@@ -305,35 +309,7 @@ export function findNativeTemplate(catalog: RawCatalog | null): RawEntry | null 
       && m.opencodex_catalog_kind !== CODEX_NATIVE_ALIAS_CATALOG_KIND
       && m.owned_by !== COMBO_NAMESPACE
       && !hasOcxRoutedAuthorship(m),
-  ) ?? null;
-}
-
-/**
- * Template selection, as opposed to catalog VALIDITY.
- *
- * `findNativeTemplate` answers "does this look like a real catalog?" and must stay
- * permissive: four call sites use it as a validity gate, and a catalog holding only a
- * newly launched native model has to keep passing or sync falls back to stale data.
- *
- * This answers a different question — "which row should every routed model inherit
- * from?" — and must be strict. `deriveEntry` deep-clones the chosen row, so an unknown
- * bare row carrying `base_instructions` would become the template for every routed
- * model and hand them its native eligibility metadata. #2813 is the report that made
- * that concrete: a Reserve-shaped row injected by the client is exactly such a row.
- *
- * Returning null is safe and expected; `deriveEntry` falls back to a conservative
- * synthetic template.
- */
-export function findSupportedNativeTemplate(catalog: RawCatalog | null): RawEntry | null {
-  return catalog?.models?.find(
-    m => typeof m.slug === "string"
-      && SUPPORTED_NATIVE_OPENAI_SLUGS.has(m.slug)
-      && !m.slug.includes("/")
-      && "base_instructions" in m
-      && m.opencodex_catalog_kind !== CODEX_NATIVE_ALIAS_CATALOG_KIND
-      && m.owned_by !== COMBO_NAMESPACE
-      && !hasOcxRoutedAuthorship(m),
-  ) ?? null;
+  ) ?? retainedNativeInheritanceTemplate(catalog);
 }
 
 /** Does this row already carry an `ultrafast` tier the operator put there themselves? */
@@ -809,6 +785,10 @@ export function normalizeRoutedCatalogEntry(
   delete entry.multi_agent_version;
   delete entry.multi_agent_reasoning_effort;
   delete entry.use_responses_lite;
+  // Codex 0.164 sends positional `configuration_update` effort items only for rows declaring this
+  // and freezes the request-level effort for the context window. A routed provider never
+  // negotiated that contract, so a row cloned from a GPT-6 template must not inherit it.
+  delete entry.supports_reasoning_effort_updates;
   delete entry.supports_websockets;
   // Routed rows cloned from native templates must not inherit OpenAI-only experimental context
   // delivery. Codex reads the flag as "this model accepts experimental context history" and drives

@@ -66,7 +66,8 @@ describe("install scripts", () => {
     expect(pkg.main).toBe("./bin/package-main.mjs");
     expect(pkg.exports?.["."]?.bun).toBe("./src/index.ts");
     expect(pkg.exports?.["."]?.default).toBe("./bin/package-main.mjs");
-    // Bun 1.4.2 fixes the Windows fetch streaming regression reported in #6684.
+    // Bun 1.4.2 fixes the Windows fetch streaming regression reported in #6684; 1.4.4 keeps it
+    // and ships NSS 3.131.1 roots, which drop the compromised eMudhra CAs (October 2026).
     // CI's testRunnerBun skipped 1.4.2: it segfaults while RE-LOADING the bunfig
     // preload that `--isolate` re-enters once per test file:
     // `load_preloads -> JSModuleLoader::loadModule -> JSPromise::status` dereferences a dead
@@ -93,13 +94,14 @@ describe("install scripts", () => {
     // and spun past its own timeout. Scratch run 38213764818 stalled 8 of 252 Linux shard 1/4
     // batch-5 runs that way (CLI child a zombie, its pidfd armed but never polled).
     // tests/ci-workflows/test-runner-spawnsync-finalizer.test.ts keeps the runner above it.
-    // Rejoin after the upstream runner crash is fixed and a green `lane=all` dispatch
-    // proves the unified version; then delete testRunnerBun and the setup action's role.
-    expect(pkg.dependencies?.bun).toBe("1.4.2");
-    expect(pkg.testRunnerBun).toBe("1.4.3");
-    expect(pkg.dependencies?.zod).toBe("4.4.3");
+    // The security transition now defaults both roles to 1.4.4. Keep their independent
+    // validation; promotion still requires a green full cross-platform lane=all candidate run.
+    expect(pkg.dependencies?.bun).toBe("1.4.4");
+    expect(pkg.testRunnerBun).toBe("1.4.4");
+    expect(pkg.dependencies?.zod).toBe("4.6.6");
     expect(pkg.devDependencies?.typescript).toBe("7.0.2");
-    expect(pkg.devDependencies?.["@types/bun"]).toBe("1.4.0");
+    // Bun's type definitions track the runtime pin rather than a literal of their own.
+    expect(pkg.devDependencies?.["@types/bun"]).toBe(pkg.dependencies?.bun);
     expect(pkg.scripts?.dev).toBe("bun run src/cli/index.ts start");
     expect(pkg.scripts?.["dev:proxy"]).toBe("bun run src/cli/index.ts start");
     expect(pkg.scripts?.["dev:gui"]).toBe("cd gui && bun run dev");
@@ -140,7 +142,9 @@ describe("install scripts", () => {
     const script = await readText("scripts/install.sh");
 
     expect(script).toContain("Node.js 18+ is required");
-    expect(script).toContain("npm install -g @bitkyc08/opencodex");
+    // #8361: npm 12 blocks bun's postinstall by default, so a bare install produces a
+    // package whose bundled runtime never unpacked. Both installers must permit that one script.
+    expect(script).toContain("npm install -g --allow-scripts=bun @bitkyc08/opencodex");
     expect(script).toContain("command -v ocx");
     expect(script).toContain("ocx help");
     expect(script).not.toContain("bun install -g @bitkyc08/opencodex");
@@ -151,7 +155,7 @@ describe("install scripts", () => {
     const script = await readText("scripts/install.ps1");
 
     expect(script).toContain("Node.js 18+ is required");
-    expect(script).toContain("& $npm.Source install -g @bitkyc08/opencodex");
+    expect(script).toContain("& $npm.Source install -g --allow-scripts=bun @bitkyc08/opencodex");
     expect(script).toContain("$LASTEXITCODE");
     expect(script).toContain("Get-Command ocx.cmd");
     expect(script).toContain("Get-Command ocx");
@@ -216,26 +220,34 @@ exit 0
     const launcher = await readText("bin/ocx.mjs");
 
     expect(launcher).toContain('process.argv[2] === "update"');
-    expect(launcher).toContain('["install", "-g", `${PKG}@${tag}`]');
-    expect(launcher).toContain('["add", "-g", "--allow-build=bun", `${PKG}@${tag}`]');
+    expect(launcher).toContain('const selector = child?.version ?? tag;');
+    // #8361: the launcher's own npm reinstall must allow bun's postinstall for the same
+    // reason the shipped installers do; a bare install leaves the runtime un-unpacked.
+    expect(launcher).toContain('["install", "-g", "--allow-scripts=bun", `${PKG}@${selector}`]');
+    expect(launcher).toContain('["add", "-g", "--allow-build=bun", `${PKG}@${selector}`]');
+    expect(launcher).toContain('const tag = updateTag(current);');
     expect(launcher).toContain('return String(currentVersion).includes("-preview.") ? "preview" : "latest"');
     expect(launcher).toContain("!isBunGlobalInstall()");
-    expect(launcher).toContain("repairCodexShimIfNeeded(postUpdateLauncher)");
+    expect(launcher).toContain("repairCodexShimIfNeeded(postUpdateLauncher, homePolicy.authorizeMutation)");
     expect(launcher).toContain("runNpmSelfUpdate()");
     expect(launcher).toContain("runPnpmSelfUpdate()");
+    const bunStart = launcher.indexOf('const child = probeSpawn(bun,');
+    for (const entry of ['if (installMethod === "npm") await runNpmSelfUpdate();',
+      'if (installMethod === "pnpm") await runPnpmSelfUpdate();',
+      'await runPackageManagerSelfUpdate(installMethod, childArgs);']) {
+      expect(launcher.indexOf(entry)).toBeGreaterThan(-1);
+      expect(launcher.indexOf(entry)).toBeLessThan(bunStart);
+    }
   });
 
   test("release helper watches the workflow run it just dispatched", async () => {
     const script = await readText("scripts/release.ts");
 
     expect(script).toContain("waitForReleaseWorkflowRun");
-    // The invariant is that the dispatched run is located by workflow, branch
-    // and commit — not that the call is a shell string. Every external command
-    // now goes through the shared launcher as an argv array, because Bun.$
-    // resolved PATH itself and walked past the Windows `.cmd` test shims.
+    // Pin the workflow and dev branch without filtering by a mutable pre-dispatch SHA.
     expect(script).toContain('"gh", "run", "list", "--workflow", "release.yml", "--branch"');
-    expect(script).toContain('"--commit"');
-    expect(script).toContain("createdAt,databaseId,headSha,status,url");
+    expect(script).not.toContain('"--commit"');
+    expect(script).toContain("createdAt,databaseId,headSha,status,url,headBranch,event,workflowDatabaseId");
     expect(script).toContain("await watchRun(releaseRun.databaseId)");
   });
 

@@ -200,17 +200,18 @@ describe("Codex autostart shim", () => {
   });
 
   test("PowerShell shim is written with a UTF-8 BOM (Windows PowerShell 5.1 decodes BOM-less ps1 as ANSI)", async () => {
-    const source = readFileSync(repoPath("src", "codex", "shim.ts"), "utf8");
+    const source = readFileSync(repoPath("src", "codex", "shim-wrapper-write.ts"), "utf8");
 
     expect(source).toContain("`\\uFEFF${buildWindowsPowerShellCodexShim(realCodexPath, bun, cli, bunRuntimeSource)}`");
   });
 
   test("Windows target discovery includes the extensionless Git-Bash launcher and writeShim emits a forward-slash sh shim for it", () => {
     const source = readFileSync(repoPath("src", "codex", "shim.ts"), "utf8");
+    const writeSource = readFileSync(repoPath("src", "codex", "shim-wrapper-write.ts"), "utf8");
 
     expect(source).toContain('const gitBashLauncher = join(dir, "codex");');
     expect(source).toContain("for (const path of [cmd, ps1, gitBashLauncher])");
-    expect(source).toContain("buildUnixCodexShim(gitBashPath(realCodexPath), gitBashPath(bun), gitBashPath(cli), bunRuntimeSource, gitBashPath(serviceApiTokenFilePath()))");
+    expect(writeSource).toContain("buildUnixCodexShim(gitBashPath(realCodexPath), gitBashPath(bun), gitBashPath(cli), bunRuntimeSource, gitBashPath(serviceApiTokenFilePath()))");
   });
 
   test("Unix shim accepts an injected token-file path (Git-Bash shims need forward slashes everywhere)", () => {
@@ -1184,7 +1185,7 @@ printf '%s\\n' child-codex
           });
           if (callerToken === undefined) delete env.OPENCODEX_API_AUTH_TOKEN;
           const result = shell === "cmd"
-            ? spawnSync(process.env.ComSpec ?? "cmd.exe", ["/d", "/c", "driver.cmd"], { cwd: dir, env, encoding: "utf8", timeout: SHELL_SPAWN_TIMEOUT_MS, windowsHide: true })
+            ? spawnSync(process.env.ComSpec ?? "cmd.exe", ["/d", "/c", ".\\driver.cmd"], { cwd: dir, env, encoding: "utf8", timeout: SHELL_SPAWN_TIMEOUT_MS, windowsHide: true })
             : spawnSync(`${shell}.exe`, ["-NoProfile", "-NonInteractive", "-File", driverPath], { env, encoding: "utf8", timeout: SHELL_SPAWN_TIMEOUT_MS, windowsHide: true });
           expect(result.status, result.stderr).toBe(0);
           expect(result.stdout.trim().split(/\r?\n/)).toEqual([
@@ -1856,6 +1857,54 @@ exit 127
         ? expect(readFileSync(path, "utf8")).toBe(replacements[index]) : expect(readFileSync(path)).toEqual(oldBackups[index]));
     });
   });
+
+  // #8317: a lock directory holding several aged owner records used to be unreadable, so it was never reclaimed.
+  function seedAgedLockEntries(lockPath: string, pids: number[], extra: string[] = []): string[] {
+    mkdirSync(lockPath);
+    pids.forEach((pid, index) => {
+      const ownerPath = join(lockPath, `aged-owner-${index}.json`);
+      writeFileSync(ownerPath, `${JSON.stringify({ version: 1, token: `aged-owner-${index}`, pid, createdAt: 0 })}\n`, "utf8");
+      utimesSync(ownerPath, new Date(0), new Date(0));
+    });
+    for (const name of extra) {
+      writeFileSync(join(lockPath, name), "unaccounted\n", "utf8");
+      utimesSync(join(lockPath, name), new Date(0), new Date(0));
+    }
+    return readdirSync(lockPath).sort();
+  }
+
+  test("an aged lock whose owner records all name dead pids is reclaimed", () => {
+    withInstalledShim(({ home, wrappers }) => {
+      const lockPath = join(home, "codex-shim.autorestore.lock");
+      wrappers.forEach((path, index) => process.platform === "win32"
+        ? writeFileSync(path, successfulLauncher(`two-dead-owners-${index}`), "utf8") : chmodSync(path, 0o644));
+      seedAgedLockEntries(lockPath, [2_147_483_647, 2_147_483_646]);
+
+      expect(autoRestoreCodexShim({ enabled: () => true, stabilitySleep: skipStabilityWait }).status).toBe("restored");
+      expect(existsSync(lockPath)).toBe(false);
+      wrappers.forEach(path => expect(readFileSync(path, "utf8")).toContain(SHIM_MARKER));
+    });
+  });
+
+  for (const [label, pids, extra] of [
+    ["one live owner", [2_147_483_647, process.pid], []],
+    ["an unaccounted entry", [2_147_483_647, 2_147_483_646], ["stray.tmp"]],
+  ] as const) {
+    test(`an aged multi-owner lock with ${label} is never reclaimed`, () => {
+      withInstalledShim(({ home, wrappers }) => {
+        const lockPath = join(home, "codex-shim.autorestore.lock");
+        const oldWrappers = wrappers.map(path => readFileSync(path));
+        wrappers.forEach((path, index) => process.platform === "win32"
+          ? writeFileSync(path, `replacement-${index}\n`, "utf8") : chmodSync(path, 0o644));
+        const entries = seedAgedLockEntries(lockPath, [...pids], [...extra]);
+
+        expect(autoRestoreCodexShim({ enabled: () => true, stabilitySleep: skipStabilityWait })).toEqual({ status: "deferred" });
+        expect(readdirSync(lockPath).sort()).toEqual(entries);
+        wrappers.forEach((path, index) => process.platform === "win32"
+          ? expect(readFileSync(path, "utf8")).toBe(`replacement-${index}\n`) : expect(readFileSync(path)).toEqual(oldWrappers[index]));
+      });
+    });
+  }
 
   test("stalled partial write changing during the observation interval is never promoted", () => {
     withInstalledShim(({ wrappers, backups }) => {

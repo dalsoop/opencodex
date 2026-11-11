@@ -19,6 +19,7 @@ import {
   resolveLiveSidebandUpgrade,
 } from "../live";
 import { RESPONSE_TTL_MS } from "../../responses/state";
+import { isolateCodexPoolClientMetadata } from "../../codex/forward-transport-headers";
 
 export const MAX_WS_FRAME_BYTES = 50 * 1024 * 1024;
 /**
@@ -124,7 +125,20 @@ function releaseLiveSidebandAdmission(ws: ServerWebSocket<WsData>): void {
  * `Uint8Array.from` copies into a fresh `ArrayBuffer`-backed view, so a frame
  * arriving from `node:buffer` still round-trips byte-for-byte.
  */
-export function sendUpstreamFrame(upstream: WebSocket, frame: string | Buffer): void {
+export function sendUpstreamFrame(upstream: WebSocket, frame: string | Buffer, context?: WsData["authContext"]): void {
+  if (context?.kind === "pool") {
+    let parsed: unknown;
+    try { parsed = JSON.parse(typeof frame === "string" ? frame : new TextDecoder("utf-8", { fatal: true }).decode(frame)); }
+    catch { /* Non-JSON frames retain their original bytes. */ }
+    const account = context.chatgptAccountId;
+    let isolated = isolateCodexPoolClientMetadata(parsed, account);
+    if (isolated && typeof isolated === "object" && !Array.isArray(isolated)) {
+      const record = isolated as Record<string, unknown>;
+      const session = isolateCodexPoolClientMetadata(record.session, account);
+      if (session !== record.session) isolated = { ...record, session };
+    }
+    if (isolated !== parsed) frame = typeof frame === "string" ? JSON.stringify(isolated) : Buffer.from(JSON.stringify(isolated));
+  }
   if (typeof frame === "string") {
     upstream.send(frame);
     return;
@@ -184,6 +198,19 @@ function finalizeLiveSideband(ws: ServerWebSocket<WsData>, upstream?: WebSocket)
   finally { releaseLiveSidebandAdmission(ws); }
 }
 
+function forceCloseLiveSidebandUpstream(upstream: WebSocket): void {
+  // Bun 1.4.4 waits for the peer's closing handshake; another close() while
+  // CLOSING does not finish it. Stop the transport after the graceful window,
+  // but leave admission release to the close event or an observed CLOSED state.
+  try {
+    const socket = upstream as WebSocket & { terminate?: () => void };
+    if (typeof socket.terminate === "function") socket.terminate();
+    else upstream.close(1000, "upstream close timeout");
+  } catch {
+    /* retain ownership until transport closure is confirmed */
+  }
+}
+
 function armLiveSidebandCloseFallback(ws: ServerWebSocket<WsData>, upstream: WebSocket): void {
   if (ws.data.liveCloseFallback !== undefined) return;
   ws.data.liveCloseFallback = setTimeout(() => {
@@ -193,13 +220,7 @@ function armLiveSidebandCloseFallback(ws: ServerWebSocket<WsData>, upstream: Web
       finalizeLiveSideband(ws, upstream);
       return;
     }
-    // A close frame was already sent below. Retry once, but never surrender
-    // native-main ownership while the authenticated transport remains live.
-    try {
-      upstream.close(1000, "upstream close timeout");
-    } catch {
-      /* upstream is already unusable */
-    }
+    forceCloseLiveSidebandUpstream(upstream);
     // Some implementations transition synchronously without delivering the
     // close event. That is still an observed CLOSED transport and is safe to
     // finalize. CONNECTING/CLOSING peers keep the lease so profile switching
@@ -238,17 +259,13 @@ export function closeLiveSidebandBeforeUpgrade(
       releaseOnce();
       return;
     }
-    try {
-      upstream.close(1000, "upstream close timeout");
-    } catch {
-      /* retain ownership until CLOSED is observed */
-    }
+    forceCloseLiveSidebandUpstream(upstream);
     if ((upstream.readyState as number) === 3) releaseOnce();
   }, LIVE_SIDEBAND_CLOSE_FALLBACK_MS);
   try {
     upstream.close(code, reason);
   } catch {
-    /* the bounded fallback retries without releasing ownership */
+    /* the bounded fallback stops the transport before releasing ownership */
   }
   if ((upstream.readyState as number) === 3) releaseOnce();
 }
@@ -272,12 +289,12 @@ export function closeLiveSideband(ws: ServerWebSocket<WsData>, code = 1000, reas
     // The sideband holds a native-main admission lease. Do not release it just
     // because the downstream left: its authenticated upstream remains live
     // until the close event arrives or the transport is observed CLOSED. The
-    // bounded fallback only retries close; it does not release ownership.
+    // bounded fallback terminates the transport; it cannot release a live lease.
     armLiveSidebandCloseFallback(ws, upstream);
     try {
       upstream.close(code, reason);
     } catch {
-      /* the fallback retries close without releasing ownership */
+      /* the fallback stops the transport without releasing a live lease */
     }
   }
   try {
@@ -287,6 +304,18 @@ export function closeLiveSideband(ws: ServerWebSocket<WsData>, code = 1000, reas
   } catch {
     /* client already gone */
   }
+}
+
+/** Only dictation opts in: a validated close gets a separate bounded drain window. */
+export function beginAudioFinalization(ws: ServerWebSocket<WsData>, raw: string | Buffer): void {
+  if (ws.data.liveFinalizationMs === undefined || ws.data.liveFinalizing || ws.data.liveClosing) return;
+  // The frame validator has already accepted this JSON text frame.
+  if (typeof raw !== "string" || JSON.parse(raw).type !== "session.close") return;
+  ws.data.liveFinalizing = true;
+  if (ws.data.liveSessionTimer !== undefined) clearTimeout(ws.data.liveSessionTimer);
+  ws.data.liveSessionTimer = setTimeout(() => {
+    closeLiveSideband(ws, 1000, "audio finalization expired");
+  }, ws.data.liveFinalizationMs);
 }
 
 /**
@@ -488,7 +517,9 @@ export function attachLiveSidebandUpstream(
       ws.data.liveOutcome = "timeout";
       closeLiveSideband(ws, 1011, "audio connection timed out");
     }, 10_000);
-    ws.data.liveSessionTimer = setTimeout(() => closeLiveSideband(ws, 1000, "audio session expired"), ws.data.liveMaxSessionMs);
+    ws.data.liveSessionTimer = setTimeout(() => {
+      closeLiveSideband(ws, 1000, "audio session expired");
+    }, ws.data.liveMaxSessionMs);
   }
 
   upstream.addEventListener("close", (event) => {
@@ -571,7 +602,7 @@ export function attachLiveSidebandUpstream(
     ws.data.livePendingBytes = undefined;
     for (const frame of pending) {
       try {
-        sendUpstreamFrame(upstream, frame);
+        sendUpstreamFrame(upstream, frame, ws.data.authContext);
       } catch {
         closeLiveSideband(ws, 1011, "upstream send failed");
         return;

@@ -10,10 +10,10 @@ description: SSH で OpenCodex の Home コンピューターと Child コンピ
 - Home から Child に OpenSSH キーでログインできること。
 - Child から開始するリンクでは、Child から Home に OpenSSH キーでログインできる必要があります（パスワードログインには対応していません）。
 - Child に OpenCodex 2.66.0 以降がインストールされていること（Child から開始するリンクでは Home にも）。
-- 両方のコンピューターが macOS または Linux であること。
+- 両方のコンピューターで macOS、Linux、Windows x64 を使用できます。Windows には OpenSSH Server と Windows PowerShell が必要です。Git Bash と curl は不要です。
 - Home から Child を追加するダッシュボードは Home 上で開くか、ペアリング済みの Hub セッションを使用します。現在のコンピューターを Child にするには、オペレーターがペアリングしたダッシュボードセッションが必要です。認証情報なしのローカルセッションでは、このルーティング変更を確定できません。
 
-パスワード SSH と Windows は現在のフローに含まれません。リンクはどちら側からでも開始できます。次の手順のように Home から開始するか、後述の「このコンピューターを Child として接続する」のように Child から開始します。
+パスワード SSH はサポートされません。リンクは Home または Child から開始できます。Windows では検証済みの OpenSSH 接続経由で PowerShell を実行します。
 
 ## `#remote` から Child を追加する
 
@@ -55,7 +55,7 @@ Home のプロバイダーを使うコンピューターで次の操作を行い
 
 - **Connected** は SSH トンネルが準備でき、Child が Home のリンクを使える状態です。
 - **Reconnecting** はトンネルを再試行している状態です。再試行中はリクエストが `Retry-After` 付きの `503` を一時的に返すことがあります。自分のダッシュボードから接続した Child では、リクエストはまずトンネルの復帰を最大 15 秒待ちます。
-- **Failed** は対応が必要な状態です。SSH 認証、確認済みのホストキー、転送、タイムアウトの理由を確認してください。SSH トンネルを張る側が、スリープ、障害、再起動の後も自動で再試行します。Home が追加した Child では Home が、自分のダッシュボードから接続した Child では Child が再試行します。タイムアウトや転送エラーの後は約 1 分ごと、認証エラーの後は 5 分ごとです。ホストキーが変わった場合は再試行しません。すぐに再接続するには、Home のダッシュボードで **Retry** を選ぶか、Home で `ocx link reconnect --link-id <id>` を実行します。OpenCodex を再起動せずに、そのリンクのトンネルだけを張り直します。
+- **Failed** は対応が必要な状態です。SSH 認証、確認済みのホストキー、転送、タイムアウトの理由を確認してください。SSH トンネルを張る側が、スリープ、障害、再起動の後も自動で再試行します。Home が追加した Child では Home が、自分のダッシュボードから接続した Child では Child が再試行します。タイムアウトや転送エラーの後は 1 分後に再試行し、失敗が続くたびに間隔を倍にして最大 5 分ごとになります。認証エラーの後は 5 分ごとです。ホストキーが変わった場合は再試行しません。すぐに再接続するには、Home のダッシュボードで **Retry** を選ぶか、Home で `ocx link reconnect --link-id <id>` を実行します。OpenCodex を再起動せずに、そのリンクのトンネルだけを張り直します。
 
 リンクが失敗しても、ローカルプロバイダーへ自動的に切り替わることはありません。
 
@@ -85,9 +85,12 @@ ocx link issue --alias <alias> --tunnel-port <port> [--json]
 ocx link status [--json]
 ocx link revoke --link-id <id> [--json]
 ocx link reconnect --link-id <id> [--json]
+ocx link check (--link-id <id> | --all) [--no-wait] [--json]
 ```
 
 対話型端末（TTY）でない場合、`--expect-fingerprint` は必須です。対話型端末では省略できますが、提示されたフィンガープリントを明示的に承認する必要があります。
+
+Home で `ocx link check (--link-id <id> | --all)` を実行すると、Home から追加した各 Child のインストール済みバージョン、インストール種別、更新経路を読み取ります。リンクの SSH 経由で Child の `ocx update --plan` を実行し（Child ごとに 60 秒、同時に 3 台まで）、計画を計算するだけで何も変更しません。2.97.0 より古い Child は `owner-action`（`legacy-ocx`）となり、バージョンは macOS と Linux では読み取り専用の SSH 呼び出しをもう 1 回行って、Windows ではリンク経由で報告されたバージョンから取得します。Child 側から接続したリンクと `ocx-child` の Child は SSH なしで報告されます。`ocx link status --json` は各行に `child` ブロック（バージョン、バージョン差、カタログの鮮度、アクティビティ、直近の操作）を追加します。詳細と終了コードは [Child install, catalog and activity](/guides/remote-link/#child-install-catalog-and-activity)（英語）を参照してください。
 
 ## 関連ガイド
 

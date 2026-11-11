@@ -15,7 +15,7 @@ description: リスナー、リモート アクセス、アドミッション �
 | `emptyCompletionRetry?` | `boolean` | `false` | テキストもツール呼び出しもない Responses ターンを、ターミナルイベント前にストリームが終了した場合も含め、同一リクエストで 1 回再試行するよう明示的に有効化します。再試行は課金対象になる場合があります。`OCX_EMPTY_COMPLETION_RETRY=0` で設定を変更せず無効化できます。combo と routed-compaction turn は対象外です。 |
 | `dropCodexSafetyBuffering?` | `boolean` | `false` | Codex Responses パススルーから Codex の safety-buffering ヒントを除去します。対象は `x-codex-safety-buffering-enabled` / `x-codex-safety-buffering-faster-model` 応答ヘッダー、`safety_buffering` 型の `response.metadata` SSE イベント、およびその他の SSE イベントにある `safety_buffering` フィールドです。Codex TUI はこれらを、既定の操作でセッションをより弱いモデルに切り替える「より高速なモデルで再試行」プロンプトとして表示します。その他の `x-codex-*` ヘッダーと SSE イベントの内容は、そのフィールドの除去を除いて変更せずに転送されます。既定ではオフです。 |
 | `stallTimeoutSec?` | `number` | `300`（public）/ 無効（local） | ストリームが遮断されるまでの、有効な上流進捗がない秒数（Responses とネイティブ Chat）。未設定では**ローカル**上流（loopback・プライベート・`.local`/`.lan` 名）は無効が既定、public 上流は 300 秒。正の値は両方に適用（最小 1 秒）、`0` で無通信 watchdog を全面無効化。canonical ChatGPT SSE を非ストリーミング JSON にまとめる Responses リクエストには、watchdog が無効でも独立した 15 分の全体上限が残る。`/v1/responses/compact` の保留ボディ読み取りもこの予算を共有するが、ローカル上流でも既定は 300 秒。明示値（`0` を含む）が優先される。 |
-| `connectTimeoutMs?` | `number` | `200000` |試行ごとの DNS/TCP/TLS/最終ヘッダーの期限。本体が生成される前に終了します。 |
+| `connectTimeoutMs?` | `number` | `200000`（public）/ 無効（local） | リクエスト送信から上流が最初の応答ヘッダーを返すまでの試行ごとの期限（DNS/TCP/TLS とヘッダー待ち）。本体生成の前に終了し、本体ストリームを制御する `stallTimeoutSec` とは無関係です。未設定では**ローカル**上流（loopback・プライベート・`.local`/`.lan` 名）は無効が既定、public 上流は 200 秒。正の値は両方に適用、`0`（または任意の非正値）でヘッダー期限を全面無効化します。無効にすることで、ローカルモデルが大きなプロンプトで数分の prompt prefill を行っても、最初のヘッダーのタイマーが健全なリクエストを切断しません。 |
 | `shutdownTimeoutMs?` | `number` | `5000` |アクティブなターンが中止される前の正常な排出期限。 |
 | `websockets?` | `boolean` | `false` | クライアント向け Responses WebSocket パスを広告して許可します。false の場合クライアントは HTTP/SSE を使いますが、対象となる canonical ChatGPT upstream WS 最適化は無効にしません。 |
 | `corsAllowOrigins?` | `string[]` | `[]` | 追加の正確な CORS origin。ループバック origin は常に許可します。`chrome-extension://<extension-id>` など authority ベースのブラウザー拡張 origin に対応し、`*` はワイルドカードではありません。Firefox と Safari は拡張 UUID を（インストール/ブラウザー起動ごとに）再生成するため、origin が変わったらエントリを更新してください。 |
@@ -26,11 +26,13 @@ description: リスナー、リモート アクセス、アドミッション �
 | `serviceHealthRecovery.enabled?` | `boolean` | `false` | バックグラウンドサービス向けのオプトイン復旧。小さな監視プロセスが `/healthz` を確認し、プロキシが生きたまま連続プローブに約 1 分間まったく応答しない場合に終了させ、サービスマネージャー（タスク スケジューラ、launchd、systemd、WinSW）に再起動させます。管理対象サービスの子プロセスでのみ起動し、停止したプロセスが保持していたリクエストは再送しません。1 時間あたり最大 3 回。再起動が必要です。自動復旧には数値のバインドアドレス（または既定の localhost/ワイルドカード マッピング）が必要です。DNS バインド名は監視されません。記録されたアドレスまたはポートが変更されると監視が停止します。 |
 | `codexAutoStart?` | `boolean` | `true` | Codex を起動する前に、Codex シムで `ocx ensure` を実行させます。 False を指定すると、操作が行われないことが保証されます。 |
 | `codexShimAutoRestore?` | `boolean` | `true` |完了した外部 Codex アップデートによってインストールされたシムが置き換えられた後、インストールされているシムを復元します。環境オプトアウト: `OPENCODEX_CODEX_SHIM_AUTO_RESTORE=0`。 |
+| `nativeMainRefresh?` | `"codex" \| "opencodex"` | auto | `CODEX_HOME` 内のネイティブ メイン ChatGPT ログインを更新する主体を選択します。キーリングの応答はその照会だけに適用されます。トークンがなければその認証情報の準備は失敗しますが、次の照会が同じトークンを返しても利用できます。永続的な拒否状態は保持せず、準備済みのリクエストは完了できます。ファイルベースの動作は変わりません。自動選択を含む動作の詳細は[英語版 Server fields](/reference/configuration/server/#server-fields)を参照してください。 |
 | `syncResumeHistory?` | `boolean` | `true` | Codex App 履歴の互換性を元に戻すことができます。元のメタデータは `ocx stop` / `ocx restore` によってバックアップおよび復元されます。 |
 | `shadowCallIntercept?` | `{ enabled?: boolean; model?: string; sourceModels?: string[] }` |オフ |認識された Codex ヘルパー/シャドウ呼び出しを、リクエストに設定された推論エフォートを維持したまま選択したモデルにリダイレクトします。デフォルトのソースプレフィックスは `gpt-6-luna`, `gpt-5.6-luna` です。0.144.x 以前のクライアントでは `gpt-5.4-mini` が使われており、`sourceModels` で復元できます。 |
 | `webSearchSidecar?` | `OcxWebSearchSidecarConfig` |使用可能な場合はオン | Web 検索サイドカー オプション。 |
 | `visionSidecar?` | `OcxVisionSidecarConfig` |使用可能な場合はオン |画像説明サイドカー オプション。 |
 | `images?` | `OcxImagesConfig` | OpenAI の自動選択 | Codex `image_gen` のスタンドアロン イメージ リレー オプション。 |
+| `telemetry?` | `OcxTelemetryConfig` | 人間への通知後に既定でオン | 匿名の1日ごとの利用統計テレメトリの同意状態（`decision`、`decidedAt`、`noticeShownAt`）。人が通知を見るか同意するまで何も送信されません。`OCX_TELEMETRY=0` または `DO_NOT_TRACK=1` で上書きされます。[テレメトリ (`telemetry`)](#テレメトリ-telemetry) と [テレメトリとプライバシー](/ja/guides/telemetry/) を参照してください。 |
 
 バックアップ サポートが存在する前に古い開発ビルドで再開履歴メタデータが変更された場合は、`ocx recover-history --legacy-openai --yes` を実行してネイティブ プロバイダーの回復を強制します。
 このコマンドは、正当な専用プロバイダー履歴を含む、ユーザーメッセージを持つすべての `opencodex` 行を再ラベル付けします。実行前にライフサイクル リファレンスの全範囲に関する警告を確認してください。
@@ -92,6 +94,35 @@ ssh -L 20100:localhost:10100 -L 1455:localhost:1455 you@remote
 :::caution[転送されたループバックは認証されていません]
 プレーン `ssh -L` はローカル ループバックでリッスンし、デフォルトの非認証バインドに対して安全です。 `ssh -g -L`、ブロードコンテナパブリッシング、または `0.0.0.0` でクライアント側を公開する転送モードを使用しないでください。不明な場合は、`ssh -L 127.0.0.1:20100:localhost:10100` と明示的にバインドします。
 :::
+
+## テレメトリ (`telemetry`)
+
+匿名の1日ごとの利用統計テレメトリは、人が通知（GUI ポップアップまたは対話型ターミナルのプロンプト）を見た後にのみ既定でオンになります。`config.json` の `telemetry` ブロックはこの同意状態を記録します。
+
+```json
+{
+  "telemetry": {
+    "decision": "accepted",
+    "decidedAt": "2026-11-07T09:00:00.000Z",
+    "noticeShownAt": "2026-11-07T09:00:00.000Z"
+  }
+}
+```
+
+| フィールド | 型 | 既定値 | 説明 |
+| --- | --- | --- | --- |
+| `telemetry.decision?` | `"accepted" \| "declined"` | 未設定（未決定） | 明示的なユーザーの選択。`"declined"` はテレメトリを無効化し `<OPENCODEX_HOME>/telemetry-id.json` を削除します。`"accepted"` は日次レポートを有効化します。 |
+| `telemetry.decidedAt?` | `string` (ISO 8601) | 未設定 | `decision` が記録された UTC タイムスタンプ。`decidedAt ?? noticeShownAt` の UTC 日より後の完了済み UTC 暦日（`day > formatUtcDay(decidedAt ?? noticeShownAt)`）のみが送信され、同意当日およびそれ以前の日は送信されません。 |
+| `telemetry.noticeShownAt?` | `string` (ISO 8601) | 未設定 | ウェブダッシュボードまたは対話型ターミナルで人間が開示通知を見た UTC タイムスタンプ。`decision` が未設定の場合、`noticeShownAt` が設定されているときのみ送信され（`default-on`）、未設定なら `awaiting-notice` のまま待機します。 |
+
+コレクターのエンドポイント（`https://telemetry.opencodex.me/v1/events`）はコード定数であり、`config.json` では変更できません。
+
+2 つの環境変数が `config.json` より優先され、保存済み `config.json` を変更せずにテレメトリを即座に無効化します（起動時またはスケジューラのティックで検出されると `<OPENCODEX_HOME>/telemetry-state.json` に当日の UTC 日を `ineligibleThroughDay` として記録し `<OPENCODEX_HOME>/telemetry-id.json` を削除するため、後から変数を解除してもその期間の日次データは送信されず新しい ID が発行されます）。
+
+- `OCX_TELEMETRY=0`（大文字・小文字を問わず `false`、`off`、`no` も可）
+- `DO_NOT_TRACK=1`（大文字・小文字を問わず `true`、`yes` も可）
+
+`ocx config set telemetry` と `ocx config unset telemetry` は拒否され、`ocx config import` もすべての呼び出し元でインポートされた `telemetry` ブロックを無視して既存の状態を保持します。代わりに `ocx telemetry enable`（対話型ターミナルが必須で開示と確認を表示し、それ以外は `agent_consent_required` / `tty_required` で終了）、`ocx telemetry disable`、`ocx telemetry status [--json]`、またはダッシュボードの **プロキシ詳細** トグルを使用してください。ペイロードスキーマと保持ポリシーの詳細は [テレメトリとプライバシー](/ja/guides/telemetry/) を参照してください。
 
 ## ストレージのクリーンアップ
 
@@ -245,3 +276,11 @@ CLI 内部の再試行・ツールターンは要求全体の送信回数上限�
 完全だが不正な記録（最終行の `null` も含む）は上限付きの受け入れを拒否します。圧縮は有効な残高を保持して続行し、
 実行中の拒否はクリーンなジャーナルを再起動で読み直すまで残ります。途中で切れた最終 JSON 行は従来の復旧規則に従います。
 詳しい境界とエラーは[英語の正本](/reference/configuration/server/#historical-pool-continuity)を参照してください。
+
+## ローカル upstream のタイムアウト分類
+
+この分類はタイムアウト方針であり、ネットワークアクセスの許可ではありません。DNS を参照せず HTTP(S) の宛先を分類します。正確な `localhost`（大文字小文字と末尾のドットを許容）、`0.0.0.0`、IPv4 loopback (127/8)、RFC 1918 private、link-local (169.254/16)、IPv6 loopback、link-local (fe80::/10)、unique-local (fc00::/7)、IPv4-mapped アドレス、`.local`/`.lan` 名がローカルです。他の DNS 名は loopback に解決されても公開向けの期限を維持します。不正な宛先、非対応スキーム、`localhost.example` も同様です。
+
+ヘッダー期限を無効にしてもクライアントのキャンセルと上位の全体期限は維持されます。明示的な正の `stallTimeoutSec` はローカル本文の無応答を制限します。ローカルの header/stall が未設定なら、ヘッダー到着前の自動期限はありません。ネイティブ Chat/Messages のローカル JSON 読み取りは stall 予算を使用し、公開 JSON 読み取りは従来の `max(connectTimeoutMs ?? 200000, 5000)` を維持します。Compact 本文の既定 300 秒と画像・検索 sidecar の予算は変わりません。
+
+任意の `opencodeClientExport` は `headerTimeoutMs`、`chunkTimeoutMs`、`timeoutMs` に正のミリ秒または無効化する `false` を指定できます。省略時は OpenCode の既定値を維持し、不正なフィールドは出力しません。V1 options と V2 settings の provider 全体に適用します。[遅いローカルモデル](/guides/opencode/#slow-local-models-prefill-timeouts)を参照してください。

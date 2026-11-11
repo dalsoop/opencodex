@@ -1,8 +1,25 @@
 # Google Provider
 
-Created: 2026-10-16 | Updated: 2026-10-18 | Version: 1.1 (Vertex endpoint selection)
+Created: 2026-10-16 | Updated: 2026-10-18 | Version: 1.2 (Vertex per-key project)
+
+## Streaming input accounting
+
+Google-family SSE parsing counts new decoded text incrementally and waits for a newly received
+newline before splitting an incomplete line. Fragmentation therefore does not cause repeated
+UTF-8 encoding or rescanning of the growing prefix. The existing per-frame limit, terminal
+requirements and heartbeat batching remain in force. Replacement strings, including decoder
+EOF output, retain the [shared byte-accounting contract](../transports/byte-accounting.md#stream-buffer-accounting).
 
 ## Vertex API-key endpoint selection
+
+Vertex requests may use host ADC without an API key. The ambient API key stays out of generic provider configuration: `src/providers/vertex-environment-authority.ts` keeps a keyed process-local digest and observed generation with the selected route, and only the Google adapter reads the key. For ADC, routed project and location are captured and rechecked before dispatch. `src/lib/gcp-adc.ts` identifies file and marker sources by keyed content digest and observed generation, checks the source before and after token exchange, and binds its identity to the built request. Shared token refresh has independently cancellable waiters. `src/server/responses/request-transport.ts` checks the provider and request binding after pacing, transfers it on rebuild, and checks the final selection, target and credential after plugin rewrites. The `project: "auto"` auxiliary probe checks the same selection before sending. Unreadable credentials fail closed. A service-account marker selects its named credential instead of the ambient key. Metadata identity changes and an external A→B→A change entirely between observations cannot be detected locally. `tests/adapters/google/gcp-adc.test.ts` covers synthetic key, ADC and physical-dispatch boundaries.
+
+Vertex rejects forward authentication before registry normalization, including a canonical row
+whose saved adapter differs from its registry transport. A credential rebuild during
+schema repair retains the repaired body only if the rebuilt original body is unchanged; otherwise
+it refuses the replay. New dashboard presets select a static catalog explicitly, while older rows
+with no `liveModels` value retain live discovery without adding an implicit undiscovered default.
+The Settings toggle remains editable for Vertex, including canonical rows with old saved URLs.
 
 `src/adapters/google-vertex-endpoint.ts` selects the Vertex endpoint once per request and the
 same selection feeds the thought-signature replay namespace. API keys follow explicit provider
@@ -18,6 +35,21 @@ single path segment before any credential is attached; keys stay in `x-goog-api-
 `tests/adapters/google/gcp-adc.test.ts` and
 `tests/adapters/google/google-vertex-thought-signature.test.ts` cover the selection, ambient
 environment isolation, ADC fallbacks, model-path rejection, and replay isolation.
+
+`provider.project: "auto"` is an explicit opt-in for key pools that span projects. An express
+key belongs to one project, and Google's projectless NOT_FOUND names it (probed 2026-10-18 across
+five express keys; undocumented error text, not a stable discovery API), so
+`src/adapters/google-vertex-key-project.ts` sends one countTokens call for a nonexistent model to
+the fixed `aiplatform.googleapis.com` authority (manual redirects, 10 s timeout) through the
+provider's configured egress (`provider.fetch` or `configuredOutboundFetch` with `providerEgressSendInit`)
+and reads the 404 body through `readBoundedResponseBody` with a 4 KiB ceiling and UTF-8 check.
+Results are cached per key digest in an insertion-order LRU of 64 entries; concurrent first
+requests share one probe, and a caller abort detaches only that waiter unless every waiter has
+aborted. A failed, truncated, oversized or stalled probe is not cached and that request uses the
+express endpoint, so Google's own 401/403/429 for the key reaches the normal key-pool failover.
+The resolved number then takes the ordinary project path, so the replay namespace stays per
+project. ADC rejects `"auto"`.
+`tests/adapters/google/google-vertex-key-project.test.ts` covers these cases.
 
 ## Vertex credential markers
 
@@ -43,6 +75,7 @@ The management helper also owns the locked provider-deletion callback, preservin
 selection, custom-model/context-cap removal, persistence and subsequent marker cleanup order.
 `src/providers/gcp-credential-cleanup.ts` cleans removed markers after config persistence, including CLI `provider add --force` overwrites, under the
   config mutation lock, retaining credentials still referenced by any persisted provider. CLI overwrite captures both live and latest durable rows under that lock. Management overwrite reuses `snapshotProviderGcpCredentialMarkers`; CLI and management deletion use `commitProviderGcpCredentialRemoval` to capture live and valid durable markers and persist removal without releasing the lock. Failed saves and refused CLI additions do not clean credentials.
+CLI provider add and removal keep synchronous post-save cleanup inside the same config-root ACL admission as publication; cleanup failures retain the existing warning that configuration removal remains committed.
 Reference retention compares OS account identities across both `gcp-sa:` and `keychain:`
 spellings. `src/providers/key-store.ts` leaves GCP markers stored during ordinary keychain
 store/restore and refuses to restore GCP JSON through a keychain alias; the shared classification
@@ -75,13 +108,16 @@ these fixtures do not attest live upstream availability.
 ## Google thought-text visibility boundary
 
 Google-family parts with `thought: true` stay separate from assistant output. After a CCA
-Gemini request is built, the shared streaming/buffered classifier emits `thinking_delta` for
-these provider-authored summaries. Other Google wires, non-Gemini CCA models and uninitialized
-adapters retain `reasoning_raw_delta`. Model provenance is refreshed on every build.
+Gemini request or a `showThinkingSummary`-opted-in Gemini request is built, the shared
+streaming/buffered classifier emits `thinking_delta` for these provider-authored summaries.
+Other Google wires without the opt-in, non-Gemini models and uninitialized adapters retain
+`reasoning_raw_delta`. Model provenance is refreshed on every build.
 `showThinkingSummary` defaults on only for the Antigravity preset; explicit provider false and
-explicit wire summary none win. Eligible CCA Gemini requests use `includeThoughts: true` only
-when provider opt-in and per-request display both allow it. Thought signatures remain attached
+explicit wire summary none win. Eligible CCA, Vertex and direct Gemini requests use
+`includeThoughts: true` only when provider opt-in and per-request display both allow it. Thought signatures remain attached
 to their tool calls independently; they never become Anthropic thinking signatures.
+For CCA Argon summaries, the adapter also repeats the selected wire suffix tier as `thinkingLevel`;
+when summaries are disabled, Argon and the web-search sidecar retain their suffix-only request shape.
 
 The visibility marker is the boolean `thought: true`, not the presence of a `thoughtSignature`
 or the wording of the text. An unmarked signed text part remains ordinary assistant output;
@@ -119,6 +155,19 @@ A first `functionCall` that still has no real signature after replay receives th
 `skip_thought_signature_validator` sentinel through `applyAntigravityThoughtSignatureFallback`, on
 Antigravity, Vertex and AI Studio alike. AI Studio gained it for combo hops that hand Gemini a call
 another model issued (#7298); non-Gemini model ids never receive it.
+An upstream rejection clears the session's replay entry whether it arrives inside a 200 body or
+stream or as a real HTTP 400: the Antigravity/Vertex `fetchResponse` wrapper in
+`src/adapters/google.ts` reads a clone of the final 400 body and runs the same clear-on-invalid
+check, because the dispatcher reports a non-ok response without calling the adapter parsers. The
+400 status itself counts as an invalid-argument rejection for the session clear, since the
+normalized error text keeps only Google's message and not its status enum. The
+next turn therefore signs its first call with the sentinel instead of replaying a session-cached
+rejected value until TTL expiry (#8054). Durable-store eviction keeps its narrower gate: only a
+rejection whose text names a signature evicts the injected call ids, so a generic tool-schema
+`INVALID_ARGUMENT` cannot destroy valid durable signatures, and a durable entry behind a generic
+rejection stays until its TTL. The rejected request itself is not resent; `payload-rejected` stays
+resend-is-futile. `tests/adapters/google/google-signature-history-roundtrip.test.ts` drives the
+400 through `fetchResponse` on both modes.
 
 `src/adapters/openai-responses/passthrough.ts` removes item-level `extra_content` through
 `stripProviderInputItemMetadata` in `src/adapters/openai-responses/request-strips.ts` only for
@@ -136,6 +185,13 @@ Google-family requests serialize a model tool-call turn and its results as one a
 `model -> user` pair. The user turn contains exactly one `functionResponse` for every representable
 call in original call order. Missing results use an explicit unknown-history marker; duplicate,
 mismatched, and standalone results become marked text instead of unpaired function responses.
+For Cloud Code Assist routed `claude-*` models, the complete matched `functionResponse` batch
+precedes its sibling images in the same user turn; images keep call order, MIME types and bytes.
+Interleaving an image before the remaining responses makes CCA Claude reject the batch as missing
+later tool results. Single-call and text-only batches keep their existing shape. CCA Gemini,
+non-Claude CCA models, AI Studio and non-Argon Vertex retain interleaved image siblings.
+`tests/adapters/google/google-tool-result-adjacency.test.ts` checks the final compiled request
+for three parallel calls, reversed results, distinct images and route isolation.
 For Vertex `gemini-4-argon`, matched results carry representable data-URL images inside
 `functionResponse.parts`, preserving each image's call ownership. Sibling images on that route can
 produce a misleading "Requests ending with a model turn are not supported" error even when the
@@ -176,7 +232,8 @@ tool call and turns with Responses `phase: "final_answer"` are replayed whole.
 whitespace, a script's own sentence terminator (CJK, Devanagari, Arabic, Armenian, Ethiopic,
 Myanmar), or a line break, with trailing closing quotes,
 brackets and Markdown emphasis kept. Boundaries that only close a leading list marker or
-`e.g.`/`i.e.`/`etc.`/`vs.` are skipped. It never matches wording.
+`e.g.`/`i.e.`/`etc.`/`vs.` are skipped. Boundary checks use a fixed-size suffix and scan
+intervening whitespace intervals once, keeping the split linear in text length. It never matches wording.
 
 Final answers (assistant turns without tool calls), non-Gemini models such as Claude on
 Antigravity, tool calls, their signatures and client-visible output are unchanged. A leak in the

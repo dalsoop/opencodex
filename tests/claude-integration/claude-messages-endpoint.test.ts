@@ -1,11 +1,9 @@
-import { afterEach, beforeEach, expect, test } from "bun:test";
-import { managementFetch as fetch } from "../helpers/management-auth";
+import { expect } from "bun:test";
+import { installEndpointHooks, test, fetch, startServer, serveUpstream, ownCleanup, caseSignal, testDir, isolatedCodexHome, originalFetch } from "../helpers/claude-endpoint-lifetime";
 import { logsFromApiBody } from "../helpers/logs-api";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { loadConfig, saveConfig } from "../../src/config";
-import { flushConfigDirHardeningAndReaps } from "../../src/config/paths";
 import { readRecentUsageEntries } from "../../src/usage/log";
 import { buildDesktop3pRegistry } from "../../src/claude/desktop-3p";
 import type { DesktopProfile } from "../../src/claude/desktop-profile";
@@ -18,7 +16,6 @@ import {
   hydrateRequestLogsFromDisk,
   type RequestLogContext,
 } from "../../src/server/request-log";
-import { startServer } from "../../src/server";
 import { ownedServiceHomeInspection } from "../helpers/owned-service-home-inspection";
 import {
   estimateClaudeRequestTokens,
@@ -30,8 +27,6 @@ import {
 } from "../../src/server/claude-messages";
 import { estimateTokens } from "../../src/lib/token-estimate";
 import type { OcxConfig } from "../../src/types";
-import { installIsolatedCodexHome, type IsolatedCodexHome } from "../helpers/isolated-codex-home";
-import { removeTreeWithRetry } from "../helpers/remove-tree";
 import { acquireOwnedSpendHome } from "../helpers/owned-spend-home";
 import { SERVER_BUDGET_MS } from "../helpers/test-budget";
 import { createTestTranslatorBudget } from "../helpers/translator-budget";
@@ -48,34 +43,7 @@ import {
   waitForNativeMainStartupGate,
 } from "../../src/codex/native-profile-startup";
 
-let testDir = "";
-let previousHome: string | undefined;
-let previousDesktopConfigDir: string | undefined;
-let isolatedCodexHome: IsolatedCodexHome | null = null;
-const originalFetch = globalThis.fetch;
-
-beforeEach(() => {
-  previousHome = process.env.OPENCODEX_HOME;
-  isolatedCodexHome = installIsolatedCodexHome("ocx-claude-endpoint-");
-  testDir = mkdtempSync(join(tmpdir(), "ocx-claude-endpoint-"));
-  process.env.OPENCODEX_HOME = testDir;
-  previousDesktopConfigDir = process.env.OPENCODEX_CLAUDE_DESKTOP_CONFIG_DIR;
-  process.env.OPENCODEX_CLAUDE_DESKTOP_CONFIG_DIR = join(testDir, "claude-desktop");
-  globalThis.fetch = originalFetch;
-});
-
-afterEach(async () => {
-  if (testDir) await flushConfigDirHardeningAndReaps(testDir);
-  if (isolatedCodexHome) await flushConfigDirHardeningAndReaps(isolatedCodexHome.path);
-  if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
-  else process.env.OPENCODEX_HOME = previousHome;
-  if (previousDesktopConfigDir === undefined) delete process.env.OPENCODEX_CLAUDE_DESKTOP_CONFIG_DIR;
-  else process.env.OPENCODEX_CLAUDE_DESKTOP_CONFIG_DIR = previousDesktopConfigDir;
-  isolatedCodexHome?.restore();
-  isolatedCodexHome = null;
-  globalThis.fetch = originalFetch;
-  if (testDir) removeTreeWithRetry(testDir);
-});
+installEndpointHooks();
 
 function mockChatUpstream() {
   return mockChatUpstreamCapturing().server;
@@ -84,7 +52,7 @@ function mockChatUpstream() {
 function mockChatUpstreamCapturing() {
   const captured: Array<Record<string, unknown>> = [];
   const urls: string[] = [];
-  const server = Bun.serve({
+  const server = serveUpstream({
     port: 0,
     async fetch(req) {
       urls.push(req.url);
@@ -240,11 +208,11 @@ test("Desktop OFF leaves Claude messages and health live", async () => {
     await server.stop(true);
     upstream.stop(true);
   }
-});
+}, { timeout: SERVER_BUDGET_MS });
 
 test("native generated-agent passthrough preserves legacy thinking", async () => {
   let captured: Record<string, unknown> | null = null;
-  const upstream = Bun.serve({
+  const upstream = serveUpstream({
     port: 0,
     async fetch(req) {
       captured = await req.json() as Record<string, unknown>;
@@ -295,7 +263,7 @@ test("native generated-agent passthrough preserves legacy thinking", async () =>
 
 test("native Anthropic passthrough clears the header deadline before streaming the body", async () => {
   const encoder = new TextEncoder();
-  const upstream = Bun.serve({
+  const upstream = serveUpstream({
     port: 0,
     fetch() {
       const body = new ReadableStream<Uint8Array>({
@@ -447,6 +415,7 @@ const MESSAGE_START_FRAME = 'event: message_start\ndata: {"type":"message_start"
 const UNSPACED_USAGE_FRAMES = [
   'event:message_start\ndata:{"type":"message_start","message":{"usage":{"input_tokens":11}}}\n\n',
   'event:message_delta\ndata:{"type":"message_delta","usage":{"output_tokens":7}}\n\n',
+  'event:message_stop\ndata:{"type":"message_stop"}\n\n',
 ].join("");
 
 test("A0: usage extraction accepts unspaced data fields (#1170)", async () => {
@@ -463,8 +432,8 @@ test("A0: usage extraction accepts unspaced data fields (#1170)", async () => {
 
   // The bytes pass through untouched either way; what the strict prefix broke was the inspection.
   expect(text).toContain("message_start");
-  // "terminal" rather than "eof" is itself part of the fix: recognizing the unspaced
-  // `message_delta` is what lets the tap classify the close as a real terminal frame.
+  // A 200 terminal close depends on recognizing the unspaced frames: an unparsed
+  // `message_stop` would leave the turn looking cut short.
   expect(calls).toEqual([{ status: 200, closeReason: "terminal" }]);
   expect(ctx.usage).toEqual(expect.objectContaining({ inputTokens: 11, outputTokens: 7 }));
 });
@@ -617,7 +586,7 @@ test("synthetic error tail parses as a terminal error in the Anthropic dialect (
 });
 
 test("endpoint wiring: configured bodyStallSec bounds a stalled native passthrough stream", async () => {
-  const upstream = Bun.serve({
+  const upstream = serveUpstream({
     port: 0,
     fetch() {
       const body = new ReadableStream<Uint8Array>({
@@ -654,11 +623,11 @@ test("endpoint wiring: configured bodyStallSec bounds a stalled native passthrou
     await server.stop(true);
     upstream.stop(true);
   }
-});
+}, { timeout: SERVER_BUDGET_MS });
 
 test("native openai-responses route carries prompt_cache_key + synthesized session_id header", async () => {
   const capture: { headers?: Record<string, string>; body?: Record<string, any> } = {};
-  const upstream = Bun.serve({
+  const upstream = serveUpstream({
     port: 0,
     async fetch(req) {
       const url = new URL(req.url);
@@ -726,7 +695,7 @@ test("native openai-responses route carries prompt_cache_key + synthesized sessi
 
 test("native openai-responses Claude route logs cyber terminals as 400 cyber_policy", async () => {
   clearRequestLogsForTests();
-  const upstream = Bun.serve({
+  const upstream = serveUpstream({
     port: 0,
     fetch() {
       return new Response([
@@ -768,14 +737,14 @@ test("native openai-responses Claude route logs cyber terminals as 400 cyber_pol
       }),
     });
     expect(response.status).toBe(200);
-    expect(await response.text()).toContain("blocked");
+    expect(await response.text()).toContain("The provider rejected the request.");
     const entry = getRequestLogEntries().findLast(e => e.surface === "claude");
     expect(entry).toMatchObject({
       status: 400,
       errorCode: "cyber_policy",
       terminalStatus: "failed",
       closeReason: "terminal",
-      upstreamError: "blocked",
+      upstreamCondition: "request_rejected",
     });
   } finally {
     await server.stop(true);
@@ -789,7 +758,7 @@ test("custom forward openai-responses route never receives the main ChatGPT cred
     tokens: { access_token: "main-secret-must-not-leave", account_id: "main-account-must-not-leave" },
   }));
   const captured: Array<{ authorization: string | null; accountId: string | null }> = [];
-  const upstream = Bun.serve({
+  const upstream = serveUpstream({
     port: 0,
     fetch(req) {
       captured.push({
@@ -841,7 +810,7 @@ test("shadow-call rerouting cannot carry the main ChatGPT credential to a custom
     tokens: { access_token: "main-secret-must-not-leave", account_id: "main-account-must-not-leave" },
   }));
   const captured: Array<{ authorization: string | null; accountId: string | null }> = [];
-  const upstream = Bun.serve({
+  const upstream = serveUpstream({
     port: 0,
     fetch(req) {
       captured.push({
@@ -915,7 +884,7 @@ test("Claude replay owns optional main enrichment while routed work survives dra
   let markStarted!: () => void;
   const started = new Promise<void>(resolve => { markStarted = resolve; });
   const encoder = new TextEncoder();
-  const upstream = Bun.serve({
+  const upstream = serveUpstream({
     port: 0,
     fetch() {
       upstreamCalls += 1;
@@ -1022,7 +991,7 @@ test("Claude replay owns optional main enrichment while routed work survives dra
     upstream.stop(true);
     resetLifecycleDrainStateForTests();
   }
-});
+}, { timeout: SERVER_BUDGET_MS });
 
 test("routed Claude requests give OpenAI sidecars main auth without leaking it to the routed provider", async () => {
   const mainAccessToken = "main-chatgpt-access";
@@ -1032,7 +1001,7 @@ test("routed Claude requests give OpenAI sidecars main auth without leaking it t
   const sidecarCalls: Array<{ headers: Headers; body: Record<string, any>; kind: "vision" | "web-search" }> = [];
   const routedCalls: Array<{ authorization: string | null; body: Record<string, any> }> = [];
 
-  const forward = Bun.serve({
+  const forward = serveUpstream({
     port: 0,
     async fetch(req) {
       const body = await req.json() as Record<string, any>;
@@ -1047,7 +1016,7 @@ test("routed Claude requests give OpenAI sidecars main auth without leaking it t
       ].join(""), { headers: { "content-type": "text/event-stream" } });
     },
   });
-  const routed = Bun.serve({
+  const routed = serveUpstream({
     port: 0,
     async fetch(req) {
       const body = await req.json() as Record<string, any>;
@@ -1123,11 +1092,13 @@ test("routed Claude requests give OpenAI sidecars main auth without leaking it t
   const invokeMessages = async (): Promise<number> => {
     const turnAdmissionLease = tryAdmitTurn();
     if (!turnAdmissionLease) throw new Error("test turn admission unavailable");
+    const releaseTurn = ownCleanup(() => turnAdmissionLease.release());
     const start = Date.now();
     try {
       const response = await handleClaudeMessages(
         new Request("http://localhost/v1/messages", {
           method: "POST",
+          signal: caseSignal(),
           headers: {
             "content-type": "application/json",
             "x-api-key": "placeholder",
@@ -1142,13 +1113,13 @@ test("routed Claude requests give OpenAI sidecars main auth without leaking it t
       await response.text();
       return response.status;
     } finally {
-      turnAdmissionLease.release();
+      releaseTurn();
     }
   };
   // One lease for the whole case rather than one per invocation: both turns run against the same
   // home, and re-taking it between them would discard the ledger this case is still accounting
   // into. File-wide would be wrong the other way, since most cases here start a real server.
-  const releaseSpendHome = acquireOwnedSpendHome();
+  const releaseSpendHome = ownCleanup(acquireOwnedSpendHome());
   try {
     expect(await invokeMessages()).toBe(200);
 
@@ -1409,7 +1380,7 @@ test("claudeCode.enabled=false -> 403 permission_error on both routes", async ()
 
 test("compatibility is uniform across translated adapters and rejects before inference", async () => {
   let sends = 0;
-  const upstream = Bun.serve({ port: 0, fetch() { sends++; return new Response("unexpected inference", { status: 500 }); } });
+  const upstream = serveUpstream({ port: 0, fetch() { sends++; return new Response("unexpected inference", { status: 500 }); } });
   const baseUrl = new URL("/v1", upstream.url).href;
   const features: Array<Record<string, unknown>> = [
     { messages: [{ role: "user", content: [{ type: "document", source: { type: "text", media_type: "text/plain", data: "private-fixture" } }] }] },
@@ -1418,7 +1389,7 @@ test("compatibility is uniform across translated adapters and rejects before inf
     { messages: [{ role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: [{ type: "document" }] }] }] },
     { messages: [{ role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: [{ type: "tool_reference", tool_name: "lookup" }] }] }] },
     { tools: [{ type: "tool_search_tool_regex_20251119", name: "tool_search" }] },
-    { tools: [{ name: "lookup", input_schema: { type: "object" }, defer_loading: true }] },
+    { tools: [{ name: "lookup", input_schema: { type: "object" } }], defer_tools: true },
     { tools: [{ name: "lookup", input_schema: { type: "object" }, strict: true }] },
     { tools: [{ name: "lookup", input_schema: { type: "object" }, allowed_callers: ["code_execution_20260120"] }] },
     { tools: [{ type: "web_search_20250305", name: "web_search", allowed_domains: ["example.invalid"] }] },
@@ -1468,7 +1439,7 @@ test("compatibility is uniform across translated adapters and rejects before inf
       } finally { await server.stop(true); }
     }
   } finally { await upstream.stop(true); }
-});
+}, { timeout: SERVER_BUDGET_MS });
 
 test("compatibility unset, shadow persistence and ordinary enforce controls", async () => {
   const { server: upstream, captured } = mockChatUpstreamCapturing();
@@ -1514,7 +1485,7 @@ test("compatibility unset, shadow persistence and ordinary enforce controls", as
     }
     expect(captured).toHaveLength(3);
   } finally { await upstream.stop(true); }
-});
+}, { timeout: SERVER_BUDGET_MS });
 
 test("present invalid compatibility modes return one fixed 503 before translation", async () => {
   const { server: upstream, urls } = mockChatUpstreamCapturing();
@@ -1544,11 +1515,11 @@ test("present invalid compatibility modes return one fixed 503 before translatio
     }
     expect(urls).toEqual([]);
   } finally { await upstream.stop(true); }
-});
+}, { timeout: SERVER_BUDGET_MS });
 
 test("native passthrough precedes even invalid compatibility mode", async () => {
   const received: unknown[] = [];
-  const upstream = Bun.serve({ port: 0, async fetch(req) {
+  const upstream = serveUpstream({ port: 0, async fetch(req) {
     received.push(await req.json());
     return Response.json({ id: "msg_test", type: "message", role: "assistant", model: "claude-haiku-4-5",
       content: [{ type: "text", text: "ok" }], stop_reason: "end_turn", stop_sequence: null, usage: { input_tokens: 1, output_tokens: 1 } });
@@ -1571,7 +1542,7 @@ test("native passthrough precedes even invalid compatibility mode", async () => 
     }
     expect(received).toEqual([body, body]);
   } finally { await upstream.stop(true); }
-});
+}, { timeout: SERVER_BUDGET_MS });
 
 test("compatibility survives management toggles and rejects Desktop source features", async () => {
   const { server: upstream, urls } = mockChatUpstreamCapturing();
@@ -1611,7 +1582,7 @@ test("compatibility survives management toggles and rejects Desktop source featu
     await server.stop(true);
     await upstream.stop(true);
   }
-});
+}, { timeout: SERVER_BUDGET_MS });
 
 test("shadow captures source thinking settings before an effort directive removes them", async () => {
   const { server: upstream, captured } = mockChatUpstreamCapturing();
@@ -1699,7 +1670,7 @@ test("generated agent effort directive restores exact xhigh and max after Claude
 
 test("generated agent effort directive preserves routed Anthropic structured output", async () => {
   const captured: Array<Record<string, unknown>> = [];
-  const upstream = Bun.serve({
+  const upstream = serveUpstream({
     port: 0,
     async fetch(req) {
       captured.push(await req.json() as Record<string, unknown>);

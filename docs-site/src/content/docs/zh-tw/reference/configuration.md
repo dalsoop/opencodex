@@ -26,6 +26,11 @@ opencodex 把持久化設定存放在 `$OPENCODEX_HOME/config.json`，通常是
 如果檔案無法解析，opencodex 會把它備份為 `config.json.invalid-<timestamp>`、在 console
 警告，並以預設值啟動。檔案缺失時也使用全新安裝的預設：一個 `openai` forward provider。
 
+本機的 `ocx config set`、`unset`、`import`、離線 `ocx effort`、自訂模型的 add/remove
+與 provider 的 add/remove/set-default 操作，會拒絕修改既有但無效或無法讀取的 `config.json`，
+並保留原始位元組。請執行 `ocx config validate` 並修復檔案後再重試。已有設定時，
+import 也要求目標檔案可讀且有效。
+
 ## 優先順序與預設值
 
 `config.json` 中的有效值會覆寫內建預設。缺失的選用欄位使用各領域頁面記載的預設值。
@@ -56,5 +61,7 @@ token 存放在個別的憑證儲存中，而非 `config.json`。帳號 id 與�
 :::note[原子寫入]
 opencodex 透過臨時檔加上重新命名（`atomicWriteFile`）寫入受管的 `config.toml` 與
 `opencodex-catalog.json`。當 `ocx stop` 與代理的 shutdown handler 這類同時寫入者
-一起恢復 Codex 時，這可避免只寫了一半的檔案。
+一起恢復 Codex 時，這可避免只寫了一半的檔案。在 Windows 上，若 `opencodex-catalog.json` 帶有唯讀屬性
+而使重新命名被拒，opencodex 會清除該屬性並重試一次；仍失敗時會回報 `Codex catalog is read-only: <path>`，
+而不是單純的 `EPERM`。
 :::

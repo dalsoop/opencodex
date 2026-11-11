@@ -1,4 +1,6 @@
-import { createLinkRelaySessions } from "./link-relay-sessions";
+import { createLinkRelaySessions, type LinkCatalogServed } from "./link-relay-sessions";
+import { createLinkPeerObservations, type LinkPeerEntry } from "../../link/peer-report";
+import { createLinkActivity, type LinkActivitySnapshot } from "../../link/child-activity";
 import type { Server } from "bun";
 import {
   emptyLinkStore,
@@ -9,6 +11,7 @@ import {
 import { linkStorePath } from "../../link/paths";
 import { linkRouteAllowed } from "../../link/routes";
 import { withConfigMutationLockSync } from "../../config/mutation-lock";
+import { registerFallbackLinkResolver } from "../../routing/fallback-policy";
 
 export const LINK_INGRESS_HOSTNAME = "opencodex-link.invalid";
 
@@ -24,6 +27,8 @@ export interface LinkListenerStartContext<T> {
   dispatch: (req: Request, server: Server<T>) => Promise<Response>;
   maxRequestBodySize: number;
   keyFingerprints?: (apiKeyId: string) => readonly string[];
+  /** The Home supervisor's current tunnel connection for a link (relay-auth.ts). */
+  connectionGeneration?: (linkId: string) => string | undefined;
 }
 
 export interface LinkListenerDeps {
@@ -51,6 +56,12 @@ export interface LinkListenerLifecycle<T> {
   linkAdmissionKeyIds(): ReadonlySet<string>;
   onAuthenticatedCatalog(listener: (apiKeyId: string) => void): () => void;
   notifyAuthenticatedCatalog(apiKeyId: string): void;
+  /** What this Home last learned of a Child over the link; empty until it relays a request. */
+  peerObservation(linkId: string): LinkPeerEntry;
+  /** Relayed model traffic for one link (D5); legacy key admissions count against every link. */
+  linkActivity(linkId: string, now: number): LinkActivitySnapshot;
+  /** A Child read a whole 200 `GET /v1/catalog` body through the relay. */
+  onCatalogServed(listener: (served: LinkCatalogServed) => void): () => void;
   status(): LinkListenerStatus;
   close(): Promise<void>;
   stop(): Promise<void>;
@@ -75,7 +86,11 @@ export function createLinkListenerLifecycle<T>(deps: LinkListenerDeps = {}): Lin
   let closeFlight: Promise<void> | undefined;
   let stopped = false;
   const authenticatedCatalogListeners = new Set<(apiKeyId: string) => void>();
+  const catalogServedListeners = new Set<(served: LinkCatalogServed) => void>();
   let lifecycleStatus: LinkListenerStatus = { state: "off", port: null, reason: null };
+  const peers = createLinkPeerObservations();
+  // Lifecycle-owned so a rebind keeps the book.
+  const activity = createLinkActivity();
 
   const setStatus = (state: LinkListenerStatus["state"], port: number | null, reason: string | null): void => {
     lifecycleStatus = { state, port, reason };
@@ -89,6 +104,9 @@ export function createLinkListenerLifecycle<T>(deps: LinkListenerDeps = {}): Lin
   const readStoreForAdmission = (): LinkStore => {
     try { return readStore(storePath); } catch { return emptyLinkStore(); }
   };
+  // OCX-11: the fallback policy resolves a link data key to its link id through this slot.
+  const releaseFallbackLinkResolver = registerFallbackLinkResolver(keyId =>
+    readStoreForAdmission().links.find(link => link.apiKeyId === keyId)?.id);
 
   const bindIfNeeded = (): void => {
     if (stopped || listener || !startContext) return;
@@ -104,7 +122,8 @@ export function createLinkListenerLifecycle<T>(deps: LinkListenerDeps = {}): Lin
       return;
     }
     const requestedPort = store.listenerPort ?? 0;
-    const sessions = createLinkRelaySessions({ fingerprints: (keyId, linkId) => {
+    const sessions = createLinkRelaySessions({ peers, activity, connectionGeneration: linkId => startContext?.connectionGeneration?.(linkId),
+      catalogServed: served => { for (const listener of catalogServedListeners) listener(served); }, fingerprints: (keyId, linkId) => {
       if (!readStoreForAdmission().links.some(link => link.id === linkId && link.apiKeyId === keyId)) return [];
       return startContext?.keyFingerprints?.(keyId) ?? [];
     } });
@@ -214,12 +233,19 @@ export function createLinkListenerLifecycle<T>(deps: LinkListenerDeps = {}): Lin
     notifyAuthenticatedCatalog(apiKeyId) {
       for (const listener of authenticatedCatalogListeners) listener(apiKeyId);
     },
+    peerObservation: linkId => peers.get(linkId),
+    linkActivity: (linkId, now) => activity.snapshot(linkId, now),
+    onCatalogServed(listener) {
+      catalogServedListeners.add(listener);
+      return () => { catalogServedListeners.delete(listener); };
+    },
     status() {
       return { ...lifecycleStatus };
     },
     close,
     async stop() {
       stopped = true;
+      releaseFallbackLinkResolver();
       // Process shutdown is deliberately forceful, unlike last-link removal. Every
       // authenticated socket is closed, and the client transport cannot reconnect it.
       relaySessions?.abortReservations();

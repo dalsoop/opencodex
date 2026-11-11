@@ -1,5 +1,5 @@
 import { providerRelativeSendPathConfigError } from "../config/provider-relative-send-path";
-import { contextTierRecordConfigError, modelCapabilitiesConfigError } from "../config/provider-validation";
+import { contextTierRecordConfigError, modelCapabilitiesConfigError, providerInputModalitiesConfigError } from "../config/provider-validation";
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { initialModelSelection } from "../providers/initial-model-selection";
 import { extractAccountId } from "../oauth/chatgpt";
@@ -29,6 +29,8 @@ import {
   providerHeadersConfigError,
   providerForwardClientHeadersConfigError,
   reasoningSummaryDeliveryRecordConfigError,
+  thinkingDisplayConfigError,
+  modelThinkingDisplayConfigError,
   upstreamHttpVersionConfigError,
   credentialPinnedProviderConfigError,
 } from "../config/provider-validation";
@@ -47,11 +49,15 @@ import { modelAutoCompactTokenLimitsConfigError } from "../providers/auto-compac
 import { vercelGatewayRoutingConfigError } from "../providers/vercel-gateway-routing";
 import { googleVertexLocationConfigError } from "../providers/google-vertex-location";
 import { xaiResponsesOptInState } from "../providers/xai-responses-opt-in";
+import { authorizationCredential } from "../lib/authorization-scheme";
+import { noteTurnStateCaller } from "./turn-state-handles";
+import { providerModelDiscoveryConfigError } from "../providers/model-discovery-config";
 
 let _corsOrigin = "http://localhost:10100";
 // Listener identity is process-local. Never infer this trust from forwarded headers: the
 // request handler marks a Request only after resolving the actual Bun Server instance.
 const trustedHubManagementRequests = new WeakSet<Request>();
+export function isTrustedHubManagementRequest(req: Request): boolean { return trustedHubManagementRequests.has(req); }
 
 export function markTrustedHubManagementRequest(req: Request): void {
   trustedHubManagementRequests.add(req);
@@ -431,10 +437,11 @@ function mintContextPrincipal(kind: string, keyId: string, credential: string): 
     .digest("hex");
 }
 
-export type DataPlaneAdmission =
+export type DataPlaneAdmission = (
   | { kind: "configured"; keyId: string; source: DataPlaneAdmissionSource; contextPrincipalId?: string }
   | { kind: "environment"; source: DataPlaneAdmissionSource; contextPrincipalId?: string }
-  | { kind: "loopback"; source: "loopback" };
+  | { kind: "loopback"; source: "loopback" }
+) & { readonly callerPolicy?: import("../types/admission-policy").CapturedAdmissionPolicy };
 
 /**
  * Which admission secret `token` is, or null when it is none of them.
@@ -501,7 +508,7 @@ export function resolveContextPrincipal(req: Request, config: OcxConfig, admissi
   if (named) return named;
   if (admission?.kind !== "loopback") return undefined;
   const dedicated = req.headers.get("x-opencodex-api-key")?.trim();
-  const bearer = req.headers.get("authorization")?.replace(/^Bearer\s+/i, "").trim();
+  const bearer = authorizationCredential(req.headers);
   const apiKey = req.headers.get("x-api-key")?.trim();
   for (const [token, source] of [[dedicated, "dedicated"], [bearer, "bearer"], [apiKey, "x-api-key"]] as const) {
     if (!token) continue;
@@ -510,6 +517,28 @@ export function resolveContextPrincipal(req: Request, config: OcxConfig, admissi
     if (principal) return principal;
   }
   return undefined;
+}
+
+/** Stable structural replay identity. This does not replace process-local opaque-state ownership. */
+export function resolveDurableReplayPrincipal(
+  req: Request,
+  config: Pick<OcxConfig, "apiKeys">,
+  admission: DataPlaneAdmission | undefined,
+  signingKey: Uint8Array,
+): string | undefined {
+  if (!admission || signingKey.length !== 32) return undefined;
+  // The managed client sends this dedicated local credential; a thread id, User-Agent,
+  // loopback address or upstream bearer never establishes structural replay ownership.
+  const token = req.headers.get("x-opencodex-api-key")?.trim();
+  if (!token) return undefined;
+  const resolved = resolveDataPlaneAdmissionSecret(token, config, "dedicated");
+  if (!resolved) return undefined;
+  if (admission.kind !== "loopback" && (admission.kind !== resolved.kind
+    || (admission.kind === "configured" && (resolved.kind !== "configured" || admission.keyId !== resolved.keyId)))) return undefined;
+  return createHmac("sha256", signingKey)
+    .update("opencodex.structural-replay-principal.v1\0")
+    .update(JSON.stringify([resolved.kind, resolved.kind === "configured" ? resolved.keyId : "", token]))
+    .digest("hex");
 }
 
 /** Whether `token` is a data-plane admission secret. */
@@ -524,11 +553,15 @@ export function isDataPlaneAdmissionSecret(token: string, config: OcxConfig): bo
  * configured entry to name, and folding them into the id as sentinel strings
  * would collide with a hand-edited entry that happens to be called `loopback` —
  * ids are only validated as non-empty strings.
+ *
+ * Every admitted data-plane path builds its log context here, so this is also where the request's
+ * caller is recorded for turn-state handle binding (src/server/turn-state-handles.ts).
  */
 export function admissionFields(admission: DataPlaneAdmission): {
   admissionKind: DataPlaneAdmission["kind"];
   apiKeyId?: string;
 } {
+  noteTurnStateCaller(admission);
   return admission.kind === "configured"
     ? { admissionKind: "configured", apiKeyId: admission.keyId }
     : { admissionKind: admission.kind };
@@ -600,13 +633,13 @@ export class ForwardAdmissionCredentialError extends Error {
 }
 
 export function validateForwardAdmissionCredential(headers: Headers, config: OcxConfig): void {
-  const bearer = headers.get("authorization")?.replace(/^Bearer\s+/i, "").trim();
+  const bearer = authorizationCredential(headers);
   if (bearer && isProxyAdmissionSecret(bearer, config)) throw new ForwardAdmissionCredentialError();
 }
 
 /** Whether Authorization carries a caller-owned native Codex credential safe to forward. */
 export function hasForwardableCodexBearer(headers: Headers, config: OcxConfig): boolean {
-  const bearer = headers.get("authorization")?.replace(/^Bearer\s+/i, "").trim();
+  const bearer = authorizationCredential(headers);
   const accountId = headers.get("chatgpt-account-id")?.trim()
     || (bearer ? extractAccountId(undefined, bearer) : undefined);
   return !!bearer && !!accountId && !isProxyAdmissionSecret(bearer, config);
@@ -621,7 +654,7 @@ export function resolveApiAuth(req: Request, config: RequestPolicyView): DataPla
   if (!isApiAuthRequired(config)) return { kind: "loopback", source: "loopback" };
   const dedicated = req.headers.get("x-opencodex-api-key")?.trim();
   if (dedicated) return resolveDataPlaneAdmissionSecret(dedicated, config, "dedicated", { linkIngress: config.linkIngress?.allowedKeyIds });
-  const bearer = req.headers.get("authorization")?.replace(/^Bearer\s+/i, "").trim();
+  const bearer = authorizationCredential(req.headers);
   if (bearer) return resolveDataPlaneAdmissionSecret(bearer, config, "bearer", { linkIngress: config.linkIngress?.allowedKeyIds });
   // Anthropic-SDK clients (Claude Code with ANTHROPIC_API_KEY) authenticate via x-api-key.
   const apiKey = req.headers.get("x-api-key")?.trim();
@@ -653,7 +686,7 @@ export function resolveResponsesApiAuth(req: Request, config: RequestPolicyView)
   // safe because the upstream credential is then SUBSTITUTED rather than forwarded -- see
   // materializeCodexUpstreamAuth. A bearer that is NOT our secret stays unadmitted here and
   // remains Codex Direct passthrough, so the two bearer domains still never mix.
-  const bearer = req.headers.get("authorization")?.replace(/^Bearer\s+/i, "").trim();
+  const bearer = authorizationCredential(req.headers);
   if (bearer) return resolveDataPlaneAdmissionSecret(bearer, config, "bearer", { linkIngress: config.linkIngress?.allowedKeyIds });
   // `x-api-key` is deliberately NOT accepted on this transport.
   return null;
@@ -746,7 +779,7 @@ export function providerManagementConfigError(
   }
   const contextTiersError = contextTierRecordConfigError(raw.modelContextTiers);
   if (contextTiersError) return contextTiersError;
-  const capabilitiesError = modelCapabilitiesConfigError(raw.modelCapabilities);
+  const capabilitiesError = providerInputModalitiesConfigError(raw.inputModalities) ?? modelCapabilitiesConfigError(raw.modelCapabilities);
   if (capabilitiesError) return capabilitiesError;
   const pinsError = providerReasoningPinsConfigError(raw);
   if (pinsError) return pinsError;
@@ -919,6 +952,10 @@ export function providerManagementConfigError(
     raw.modelSupportsReasoningSummaries,
   );
   if (reasoningSummaryDeliveryError) return `provider ${name} ${reasoningSummaryDeliveryError}`;
+  const thinkingDisplayError = thinkingDisplayConfigError(raw.thinkingDisplay);
+  if (thinkingDisplayError) return `provider ${name} ${thinkingDisplayError}`;
+  const modelThinkingDisplayError = modelThinkingDisplayConfigError(raw.modelThinkingDisplay);
+  if (modelThinkingDisplayError) return `provider ${name} ${modelThinkingDisplayError}`;
   const modelAdaptersError = modelAdapterRecordConfigError(raw.modelAdapters, "modelAdapters", name, typed);
   if (modelAdaptersError) return `provider ${name} ${modelAdaptersError}`;
   const credentialPinError = credentialPinnedProviderConfigError(name, typed);
@@ -957,24 +994,24 @@ export function providerManagementConfigError(
   if (jsonSchemaOptOutError) return `provider ${name} ${jsonSchemaOptOutError}`;
   const retainModelsError = nonBlankStringArrayConfigError(raw.retainModels, "retainModels");
   if (retainModelsError) return `provider ${name} ${retainModelsError}`;
+  const modelDiscoveryError = providerModelDiscoveryConfigError(raw.modelDiscovery);
+  if (modelDiscoveryError) return `provider ${JSON.stringify(redactSecretString(name))} ${modelDiscoveryError}`;
   const toolReasoningOptOutError = nonBlankStringArrayConfigError(
     raw.omitReasoningEffortWithToolsModels,
     "omitReasoningEffortWithToolsModels",
   );
   if (toolReasoningOptOutError) return `provider ${name} ${toolReasoningOptOutError}`;
-  const unsupportedHostedToolsError = nonBlankStringArrayConfigError(
-    raw.unsupportedHostedTools,
-    "unsupportedHostedTools",
-  );
-  if (unsupportedHostedToolsError) return `provider ${name} ${unsupportedHostedToolsError}`;
-  if (Array.isArray(raw.unsupportedHostedTools)) {
+  for (const field of ["unsupportedHostedTools", "unsupportedHostedToolsWithClientTools"] as const) {
+    const hostedToolsError = nonBlankStringArrayConfigError(raw[field], field);
+    if (hostedToolsError) return `provider ${name} ${hostedToolsError}`;
+    if (!Array.isArray(raw[field])) continue;
     // Closed vocabulary, same reason as the config schema: an unrecognized name would be
     // stored and then strip nothing, so the operator would keep getting the upstream 400
     // this field exists to prevent.
-    const unknownTool = (raw.unsupportedHostedTools as unknown[])
+    const unknownTool = (raw[field] as unknown[])
       .find(tool => typeof tool === "string" && !DECLARABLE_HOSTED_TOOL_TYPES.has(tool.trim()));
     if (unknownTool !== undefined) {
-      return `provider ${name} unsupportedHostedTools must name only hosted tool types: `
+      return `provider ${name} ${field} must name only hosted tool types: `
         + `${[...DECLARABLE_HOSTED_TOOL_TYPES].join(", ")}`;
     }
   }
@@ -1064,6 +1101,7 @@ const PROVIDER_CONFIG_FIELD_POLICY = {
   annotateEmptyToolOutputs: "editor",
   supportsServiceTier: "editor",
   modelSupportsServiceTier: "editor",
+  promoteAdditionalTools: "editor",
   preserveResponsesReasoningContent: "editor",
   preserveResponsesInputItemIds: "editor",
   preserveResponsesMessageMetadata: "editor",
@@ -1099,6 +1137,7 @@ const PROVIDER_CONFIG_FIELD_POLICY = {
   defaultModel: "editor",
   models: "editor",
   liveModels: "editor",
+  modelDiscovery: "editor",
   selectedModels: "editor",
   initialModelSelection: "runtime",
   retainModels: "editor",
@@ -1109,6 +1148,7 @@ const PROVIDER_CONFIG_FIELD_POLICY = {
   modelContextWindows: "editor",
   modelContextTiers: "editor",
   modelInputModalities: "editor",
+  inputModalities: "editor",
   modelCapabilities: "editor",
   modelMaxInputTokens: "runtime",
   modelAutoCompactTokenLimits: "editor",
@@ -1143,6 +1183,8 @@ const PROVIDER_CONFIG_FIELD_POLICY = {
   modelSupportsVerbosity: "editor",
   supportsVerbosity: "editor",
   modelReasoningSummaryDelivery: "editor",
+  thinkingDisplay: "editor",
+  modelThinkingDisplay: "editor",
   modelPreferHostedTools: "editor",
   supportsOpenAiWebSearchToolFields: "editor",
   xaiResponsesXSearch: "editor",
@@ -1150,6 +1192,7 @@ const PROVIDER_CONFIG_FIELD_POLICY = {
   zaiResponsesDefaultVersion: "runtime",
   supportsResponsesCustomTools: "editor",
   unsupportedHostedTools: "editor",
+  unsupportedHostedToolsWithClientTools: "editor",
   responsesSnapshotRepair: "editor",
   webSearchBridge: "editor",
   reasoningEffortMap: "editor",
@@ -1159,6 +1202,7 @@ const PROVIDER_CONFIG_FIELD_POLICY = {
   noTemperatureModels: "editor",
   noTopPModels: "editor",
   noStopModels: "editor",
+  arkKimiResponsesModels: "editor",
   noPenaltyModels: "editor",
   noStructuredOutputModels: "editor",
   noJsonSchemaModels: "editor",
@@ -1168,6 +1212,7 @@ const PROVIDER_CONFIG_FIELD_POLICY = {
   terminalContinuationGuard: "editor",
   openaiChatEofTolerance: "editor",
   foldDeveloperRoleToSystem: "editor",
+  singleLeadingSystemMessage: "editor",
   promptCacheKey: "editor",
   chatServiceTier: "editor",
   responsesItemIdRepair: "editor",
@@ -1194,6 +1239,7 @@ const PROVIDER_CONFIG_FIELD_POLICY = {
   desktopExecutor: "redacted",
   unsafeAllowNativeLocalExec: "editor",
   nativeLocalExec: "editor",
+  messagePhaseInference: "editor",
   tlsProfile: "editor",
 } as const satisfies Record<keyof OcxProviderConfig, ProviderConfigFieldPolicy>;
 
@@ -1326,6 +1372,16 @@ export function safeConfigDTO(config: OcxConfig): unknown {
       hasApiKey: !!provider.apiKey,
       hasHeaders: !!provider.headers && Object.keys(provider.headers).length > 0,
     };
+    const registry = getProviderRegistryEntry(name);
+    const vertex = (provider.adapter === "google" && effectiveGoogleMode(name, provider) === "vertex")
+      || (registry?.adapter === "google" && (provider.googleMode ?? registry.googleMode) === "vertex"
+        && providerMatchesRegistryTransport(name, provider));
+    if (vertex) {
+      const key = provider.apiKey;
+      dto.vertexCredentialKind = key?.startsWith("gcp-sa:") ? "marker"
+        : !key?.trim() || key === "N/A" || key.startsWith("<") ? "ambient"
+          : key.startsWith("keychain:") || /^\$\{?\w+\}?$/.test(key) ? "reference" : "api-key";
+    }
     if (name === "xai") {
       dto.xaiResponsesOptInState = xaiResponsesOptInState(provider);
     }

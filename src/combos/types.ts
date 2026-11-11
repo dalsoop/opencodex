@@ -1,7 +1,13 @@
 import { normalizeJevQuotaTiers, type ResolvedJevQuotaTiers } from "./jev-quota-config";
+import {
+  JEV_SESSION_PIN_TTL_MAX_MS,
+  JEV_SESSION_PIN_TTL_MIN_MS,
+  normalizeJevSessionPin,
+  type JevSessionPinConfig,
+} from "./jev-session-pin-config";
 import { isCodexReasoningEffort, isDeclaredReasoningEffort } from "../reasoning-effort";
 import { SUPPORTED_NATIVE_OPENAI_SLUGS } from "../codex/catalog/native-models";
-import type { OcxComboConfig, OcxComboCooldownWaitPolicy, OcxComboDefaultEffort, OcxComboDefaultEffortMode, OcxComboReasoningEffortMode, OcxComboStrategy, OcxComboTarget, OcxProviderConfig } from "../types";
+import type { OcxComboConfig, OcxComboCooldownWaitPolicy, OcxComboDefaultEffort, OcxComboDefaultEffortMode, OcxComboJevEffortMode, OcxComboReasoningEffortMode, OcxComboStrategy, OcxComboTarget, OcxProviderConfig } from "../types";
 import { COMBO_NAMESPACE, isValidComboId, resolveComboId, targetKey } from "./identifiers";
 import {
   CANONICAL_JEV_DECISION_PROVIDER,
@@ -11,6 +17,7 @@ import {
 } from "./jev-decision-contract";
 
 export const COMBO_DEFAULT_WAIT_FOR_COOLDOWN_MS = 0;
+export const COMBO_DEFAULT_COOLDOWN_REPROBE_INTERVAL_MS = 300_000;
 export const JEV_MAX_CANDIDATE_FIELD_CHARS = 512;
 export {
   JEV_DECISION_TIMEOUT_DEFAULT_MS,
@@ -54,6 +61,7 @@ export interface NormalizedComboConfig {
   stickyLimit: number;
   cooldownMs?: number;
   waitForCooldownMs: number;
+  cooldownReprobe?: { enabled: true; intervalMs: number };
   /** `before-last-resort` defers lastResort targets while a normal one can be waited out (#5691). */
   cooldownWaitPolicy: OcxComboCooldownWaitPolicy | null;
   defaultEffort: OcxComboDefaultEffort | null;
@@ -61,6 +69,15 @@ export interface NormalizedComboConfig {
   defaultEffortMode: OcxComboDefaultEffortMode;
   /** Picker-ladder derivation policy; `strict` preserves the legacy intersection rule. */
   reasoningEffortMode: OcxComboReasoningEffortMode;
+  /**
+   * Who owns the wire effort on a JEV combo.
+   *
+   * `decide` (default) applies the decision's effort and lets it override the caller.
+   * `client` keeps the decision's target choice but leaves effort to the caller and the
+   * target ladder, so a provider that must hold one tier to keep its prompt cache warm
+   * (for example one whose effort swaps the upstream model id) is never re-tiered.
+   */
+  jevEffortMode: OcxComboJevEffortMode;
   /** Disable image input; `auto` preserves the intersection derived from all targets. */
   imageInput: "auto" | "disabled";
   /** Trimmed public alias, or null when the combo keeps the default `combo/<id>` slug. */
@@ -79,6 +96,8 @@ export interface NormalizedComboConfig {
   decisionTimeoutMs?: number;
   decisionQuotaSignals?: boolean;
   decisionQuotaTiers?: ResolvedJevQuotaTiers;
+  /** JEV only, opt-in: keep a session on the target JEV chose for it (#7525). */
+  sessionPin?: JevSessionPinConfig;
   targets: NormalizedComboTarget[];
 }
 
@@ -214,6 +233,24 @@ export function comboConfigIssues(
       || body.waitForCooldownMs > 600_000)) {
     issues.push({ path: ["waitForCooldownMs"], message: "waitForCooldownMs must be an integer from 0 to 600000" });
   }
+  if (body.cooldownReprobe !== undefined) {
+    const value = body.cooldownReprobe;
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      issues.push({ path: ["cooldownReprobe"], message: "cooldownReprobe must be an object" });
+    } else {
+      const reprobe = value as Record<string, unknown>;
+      if (typeof reprobe.enabled !== "boolean") {
+        issues.push({ path: ["cooldownReprobe", "enabled"], message: "cooldownReprobe.enabled must be a boolean" });
+      }
+      if (reprobe.intervalMs !== undefined && (typeof reprobe.intervalMs !== "number"
+        || !Number.isSafeInteger(reprobe.intervalMs) || reprobe.intervalMs < 1000 || reprobe.intervalMs > 86_400_000)) {
+        issues.push({ path: ["cooldownReprobe", "intervalMs"], message: "cooldownReprobe.intervalMs must be an integer from 1000 to 86400000" });
+      }
+      if (Object.keys(reprobe).some(key => key !== "enabled" && key !== "intervalMs")) {
+        issues.push({ path: ["cooldownReprobe"], message: "cooldownReprobe supports only enabled and intervalMs" });
+      }
+    }
+  }
   if (body.cooldownWaitPolicy !== undefined && body.cooldownWaitPolicy !== null
     && body.cooldownWaitPolicy !== "before-last-resort") {
     issues.push({
@@ -243,6 +280,16 @@ export function comboConfigIssues(
       path: ["defaultEffort"],
       message: "defaultEffort is required when defaultEffortMode is force",
     });
+  }
+  if (body.jevEffortMode !== undefined
+    && body.jevEffortMode !== "decide"
+    && body.jevEffortMode !== "client") {
+    issues.push({
+      path: ["jevEffortMode"],
+      message: 'jevEffortMode must be "decide" or "client"',
+    });
+  } else if (body.jevEffortMode === "client" && body.strategy !== "jev") {
+    issues.push({ path: ["jevEffortMode"], message: 'jevEffortMode "client" is only valid with strategy "jev"' });
   }
   if (body.imageInput !== undefined && body.imageInput !== "auto" && body.imageInput !== "disabled") {
     issues.push({ path: ["imageInput"], message: 'imageInput must be "auto" or "disabled"' });
@@ -309,6 +356,16 @@ export function comboConfigIssues(
     if (body.strategy !== "jev") issues.push({ path: [field], message: `${field} is only valid with strategy "jev"` });
     if (field === "decisionQuotaSignals" ? typeof body[field] !== "boolean" : !normalizeJevQuotaTiers(body[field]))
       issues.push({ path: [field], message: field === "decisionQuotaSignals" ? "decisionQuotaSignals must be a boolean" : "decisionQuotaTiers must contain finite 0..100 strictly ascending thresholds" });
+  }
+  if (body.sessionPin !== undefined && body.sessionPin !== null) {
+    if (body.strategy !== "jev") {
+      issues.push({ path: ["sessionPin"], message: 'sessionPin is only valid with strategy "jev"' });
+    } else if (!normalizeJevSessionPin(body.sessionPin)) {
+      issues.push({
+        path: ["sessionPin"],
+        message: `sessionPin must be { "ttlMs": <integer from ${JEV_SESSION_PIN_TTL_MIN_MS} to ${JEV_SESSION_PIN_TTL_MAX_MS}> }`,
+      });
+    }
   }
   if (body.decisionProvider !== undefined && body.decisionProvider !== null) {
     const decisionProvider = typeof body.decisionProvider === "string" ? body.decisionProvider.trim() : "";
@@ -517,11 +574,16 @@ export function normalizeComboConfig(raw: OcxComboConfig): NormalizedComboConfig
     ...(raw.allowMeteredTargets === true ? { allowMeteredTargets: true } : {}),
     stickyLimit: raw.stickyLimit ?? 1,
     cooldownMs: raw.cooldownMs,
+    ...(raw.cooldownReprobe?.enabled === true ? { cooldownReprobe: {
+      enabled: true as const,
+      intervalMs: raw.cooldownReprobe.intervalMs ?? COMBO_DEFAULT_COOLDOWN_REPROBE_INTERVAL_MS,
+    } } : {}),
     waitForCooldownMs: raw.waitForCooldownMs ?? COMBO_DEFAULT_WAIT_FOR_COOLDOWN_MS,
     cooldownWaitPolicy: raw.cooldownWaitPolicy === "before-last-resort" ? "before-last-resort" : null,
     defaultEffort,
     defaultEffortMode: raw.defaultEffortMode === "force" && defaultEffort !== null ? "force" : "fallback",
     reasoningEffortMode: raw.reasoningEffortMode === "adaptive" ? "adaptive" : "strict",
+    jevEffortMode: raw.jevEffortMode === "client" ? "client" : "decide",
     imageInput: raw.imageInput === "disabled" ? "disabled" : "auto",
     alias: alias || null,
     nativeAlias: raw.nativeAlias === true,
@@ -533,6 +595,7 @@ export function normalizeComboConfig(raw: OcxComboConfig): NormalizedComboConfig
     ...(typeof raw.decisionTimeoutMs === "number" ? { decisionTimeoutMs: raw.decisionTimeoutMs } : {}),
     ...(raw.strategy === "jev" && raw.decisionQuotaSignals === true ? { decisionQuotaSignals: true } : {}),
     ...(raw.strategy === "jev" && normalizeJevQuotaTiers(raw.decisionQuotaTiers) ? { decisionQuotaTiers: normalizeJevQuotaTiers(raw.decisionQuotaTiers)! } : {}),
+    ...(raw.strategy === "jev" && normalizeJevSessionPin(raw.sessionPin) ? { sessionPin: normalizeJevSessionPin(raw.sessionPin)! } : {}),
     targets: raw.targets.map(target => ({
       provider: target.provider.trim(),
       model: target.model.trim(),

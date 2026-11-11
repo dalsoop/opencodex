@@ -185,8 +185,8 @@ function attachPendingReasoningToCallOwner(
 
 const REASONING_EFFORTS = new Set(["none", "minimal", "low", "medium", "high", "xhigh", "max"]);
 
-export function hasValidatedActiveReasoningEffort(options: Pick<OcxRequestOptions, "reasoning">): boolean {
-  return options.reasoning !== undefined && options.reasoning !== "none";
+export function hasValidatedActiveReasoningEffort(options: Pick<OcxRequestOptions, "reasoning" | "thinkingEnabled">): boolean {
+  return options.thinkingEnabled ?? (options.reasoning !== undefined && options.reasoning !== "none");
 }
 
 
@@ -217,6 +217,12 @@ function nameDestinationContent(
   return changed ? parts : content;
 }
 
+/**
+ * Validate a Responses body and normalize its tools, options and conversation.
+ * Restores signed or opaque reasoning from replayed items; late signatures require
+ * adjacent output ownership and retain thinking/signature ordering.
+ * @throws Error when the body fails Responses schema validation.
+ */
 export function parseRequest(
   body: unknown,
   parseOptions?: { replayCacheScope?: OcxReasoningReplayScopeRef },
@@ -326,6 +332,13 @@ export function parseRequest(
         // the native passthrough keeps it verbatim in _rawBody.
         const at = item as { tools?: unknown[] };
         if (Array.isArray(at.tools)) loadedToolSpecs.push(...at.tools);
+        continue;
+      }
+
+      if (effectiveType === "configuration_update") {
+        // Codex 0.164 positional reasoning-effort control. It is not a turn, so a translated route
+        // drops it without touching pending reasoning; the native passthrough keeps it verbatim in
+        // _rawBody. Mapping its effort onto the routed request is deliberately not done (#6895).
         continue;
       }
 
@@ -450,6 +463,27 @@ export function parseRequest(
         if (envelope?.krc && thinkingText.length === 0) {
           const previous = messages[messages.length - 1];
           if (previous?.role === "assistant") previous.kiroRedactedReasoning = envelope.krc;
+          continue;
+        }
+
+        // Late turn signatures follow the closed output on the wire. Bind only to the
+        // immediately preceding item named by the carrier, never the following turn.
+        if (envelope?.aft) {
+          const previousItem = inputItems[itemIndex - 1] as { id?: string; type?: string; role?: string; execution?: string } | undefined;
+          const previous = messages[messages.length - 1];
+          const properOutput = previousItem?.type === "function_call" || previousItem?.type === "custom_tool_call"
+            || (previousItem?.type === "tool_search_call" && previousItem.execution === "client")
+            || ((previousItem?.type === "message" || previousItem?.type === undefined) && previousItem?.role === "assistant");
+          if (envelope.sig && properOutput && previous?.role === "assistant"
+            && (previousItem?.id === undefined || previousItem.id === envelope.aft)) {
+            // Preserve thinking/signature adjacency even after prefatory text or earlier calls.
+            const afterThinking = previous.content.findLastIndex(part => part.type === "thinking") + 1;
+            previous.content.splice(afterThinking, 0, {
+              type: "thinking", thinking: thinkingText, signature: envelope.sig,
+              ...(envelope.red ? { redacted: envelope.red } : {}),
+              ...(reasoning.id ? { itemId: reasoning.id } : {}),
+            });
+          }
           continue;
         }
 
@@ -688,6 +722,7 @@ export function parseRequest(
   // `reasoning_effort_for_request`), so current clients never send it — but a catalog that
   // advertises ultra plus an older/direct caller can. Degrade it to max like upstream instead of
   // silently dropping reasoning altogether.
+  if (data.reasoning?.enabled !== undefined) options.thinkingEnabled = data.reasoning.enabled;
   const requestedEffort = data.reasoning?.effort === "ultra" ? "max" : data.reasoning?.effort;
   if (requestedEffort && REASONING_EFFORTS.has(requestedEffort)) {
     options.reasoning = requestedEffort;

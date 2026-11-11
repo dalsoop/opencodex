@@ -25,6 +25,11 @@ export const UPGRADE_DEADLINE_MS = 10_000;
 // keeps exactly the previous 90 s bound; a peer that does can never trip it while alive.
 export const CODEX_WS_LIVENESS_PING_INTERVAL_MS = 15_000;
 export const CODEX_WS_RESPONSE_PRELUDE_TIMEOUT_MS = 90_000;
+// The pinger keeps running after the commit: a tunnel restart or Wi-Fi rejoin can drop the path
+// without a FIN or RST, and codex-rs would wait out its 300 s idle timeout. A peer that has ponged
+// and then sends no frame and no pong for this many intervals is gone, and the stream fails so the
+// client retries. One missed pong is not a verdict.
+export const CODEX_WS_COMMITTED_SILENT_INTERVALS = 2;
 // Keep the push-based WS transport inside the same memory envelope as the
 // bounded SSE relays that consume this response. Unlike fetch response bodies,
 // a WebSocket cannot be paused when a ReadableStream applies backpressure, so
@@ -198,13 +203,29 @@ export function codexWsPreOutputRefusalHold(connectMs: number, now = Date.now())
 
 /**
  * A lifecycle frame that commits nothing the client could see or act on (#6969): created,
- * in-progress or queued, carrying a response object whose output is absent or empty. A snapshot
- * with any output item, an unknown event, or a frame addressed to another stream is not one.
+ * in-progress or queued, carrying a response object whose output is absent or empty, or the
+ * heartbeat that only keeps the connection alive. A snapshot with any output item,
+ * an unknown event, or a frame addressed to another stream is not one.
+ *
+ * A heartbeat qualifies only while it carries no output, no field this contract does not know, and
+ * at most its numeric sequence marker. A replay-unsafe mark already ran a side effect and is never
+ * held; only an absent mark or the boolean false proves there was none, so any other value fails
+ * closed rather than trusting a malformed type.
  */
 export function isEmptyCodexWsLifecycleEvent(payload: Record<string, unknown>): boolean {
+  if (payload.stream_id !== undefined) return false;
+  if (payload.type === "response.heartbeat") {
+    if ((Object.hasOwn(payload, "replayUnsafe") && payload.replayUnsafe !== false)
+      || Object.keys(payload).some(key =>
+      key !== "type" && key !== "response" && key !== "replayUnsafe" && key !== "sequence_number")) return false;
+    if (payload.sequence_number !== undefined
+      && !(typeof payload.sequence_number === "number" && Number.isSafeInteger(payload.sequence_number)
+        && payload.sequence_number >= 0)) return false;
+    return payload.response === undefined
+      || (plainRecord(payload.response) && emptyOutput(payload.response));
+  }
   if (payload.type !== "response.created" && payload.type !== "response.in_progress"
     && payload.type !== "response.queued") return false;
-  if (payload.stream_id !== undefined) return false;
   return plainRecord(payload.response) && emptyOutput(payload.response);
 }
 
@@ -404,7 +425,7 @@ export type CodexWsFailureStage = {
   firstResponseMs: number | null;
   /** Milliseconds from send to this failure; null when the failure predates the send. */
   elapsedMs: number | null;
-  /** Liveness pings the exchange sent while waiting for the first response event. */
+  /** Liveness pings the exchange sent, before and after the first response event. */
   pings: number;
   /** Pongs the peer answered with; zero on a peer that never answers pings. */
   pongs: number;

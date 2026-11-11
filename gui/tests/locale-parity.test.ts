@@ -43,6 +43,7 @@ function carriesTranslatableWords(value: string): boolean {
 const ZH_TW_KEEP_ENGLISH: ReadonlySet<string> = new Set([
   // The Codex sidebar row is the product name, kept in every locale like Claude.
   "nav.codexSet",
+  "kiroLogin.iam", // AWS product name, retained in the original spelling.
   // The primary Anthropic pool is labelled by the vendor name alone, kept in every locale.
   "sidecar.poolA",
   // A bare em dash: the "no Reasoning control" marker is a symbol, not copy.
@@ -175,6 +176,13 @@ const ZH_TW_KEEP_ENGLISH: ReadonlySet<string> = new Set([
   // Qoder is a product name, identical in every locale.
   "integrations.tab.qoder",
   "api.clientConfig.clientQoder",
+  // Qoder CN and the two WorkBuddy editions are product names too.
+  "integrations.tab.qoderCn",
+  "integrations.tab.workbuddy",
+  "integrations.tab.workbuddyAi",
+  // T3 Code is a product name, identical in every locale.
+  "integrations.tab.t3code",
+  "api.clientConfig.clientT3code",
   // Command Code is a product name, identical in every locale.
   "integrations.tab.commandcode",
   "api.clientConfig.clientCommandCode",

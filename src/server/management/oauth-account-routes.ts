@@ -1,3 +1,4 @@
+import { hasHumanDashboardSession } from "./consent-session";
 import { isAnthropicOAuthInstance, configuredAnthropicInstance, type AnthropicInstanceId } from "../../providers/anthropic-instance";
 import { resolveAnthropicAccountPoolConfig } from "../../oauth/anthropic-pool-config";
 import { persistAnthropicPoolPatch, writeAnthropicPoolSettings } from "./anthropic-pool-settings";
@@ -36,9 +37,10 @@ import {
   waitForLoginSettled,
 } from "../../oauth";
 import { OAuthMutationBusyError, removeCredential } from "../../oauth/store";
-import { cancelKiroDeviceLogin, kiroDeviceConfigBaseline, startKiroDeviceLogin, statusKiroDeviceLogin, type KiroDeviceMethod } from "../../oauth/kiro-device-login";
+import { cancelKiroDeviceLogin, kiroDeviceConfigBaseline, selectKiroDeviceProfile, startKiroDeviceLogin, statusKiroDeviceLogin, type KiroDeviceMethod } from "../../oauth/kiro-device-login";
+import { parseKiroIamOptions } from "../../oauth/kiro-iam-identity-center";
 import { providerDestinationResolvedError } from "../../lib/destination-policy";
-import { emailMaskingEnabled } from "../../lib/privacy";
+import { accountDisplayLabel, emailMaskingEnabled, maskedAccountLabel } from "../../lib/privacy";
 import { reconcileLiveStateStores } from "../../lib/state-store-registrations";
 import { enrichProviderFromCatalog, listKeyLoginProviders } from "../../oauth/key-providers";
 import { deriveProviderPresets } from "../../providers/derive";
@@ -214,12 +216,12 @@ export function revokeApiKeyInProcess(config: OcxConfig, id: string): boolean {
   return true;
 }
 
-function canStartManagementOAuth(provider: string, principal: ManagementContext["principal"]): boolean {
-  return provider !== "meta-muse" || principal === "gui-session";
+function canStartManagementOAuth(provider: string, ctx: ManagementContext): boolean {
+  return provider !== "meta-muse" || hasHumanDashboardSession(ctx);
 }
 
-function metaMuseConsentRequired(provider: string, principal: ManagementContext["principal"]): Response | null {
-  if (canStartManagementOAuth(provider, principal)) return null;
+function metaMuseConsentRequired(provider: string, ctx: ManagementContext): Response | null {
+  if (canStartManagementOAuth(provider, ctx)) return null;
   return jsonResponse({
     error: "Meta Muse login requires acknowledgement in the OpenCodex dashboard.",
     code: "oauth_consent_required",
@@ -246,7 +248,7 @@ export async function handleOauthAccountRoutes(ctx: ManagementContext): Promise<
   if (url.pathname === "/api/oauth/providers" && req.method === "GET") {
     // Discovery reflects this principal's admission; hiding a button is not the
     // consent boundary, which remains independently enforced on both POST routes.
-    return jsonResponse({ providers: listOAuthProviders().filter(provider => canStartManagementOAuth(provider, principal)) });
+    return jsonResponse({ providers: listOAuthProviders().filter(provider => canStartManagementOAuth(provider, ctx)) });
   }
 
   // API-key "login" providers (open dashboard → paste key). Drives the GUI's key-provider picker.
@@ -258,7 +260,7 @@ export async function handleOauthAccountRoutes(ctx: ManagementContext): Promise<
   // the provider's loopback callback server (inside this process) captures the redirect in the
   // background, then the credential is persisted. The GUI opens the URL and polls /api/oauth/status.
   if (url.pathname === "/api/oauth/login" && req.method === "POST") {
-    const body = await readManagementJsonBodyOr(req, {}) as { provider?: string; addAccount?: boolean; accountId?: string; reauth?: boolean; openBrowser?: unknown; method?: unknown; mode?: unknown };
+    const body = await readManagementJsonBodyOr(req, {}) as { provider?: string; addAccount?: boolean; accountId?: string; reauth?: boolean; openBrowser?: unknown; method?: unknown; mode?: unknown; startUrl?: unknown; region?: unknown; flowId?: unknown; profileArn?: unknown };
     const provider = (body.provider ?? "").trim().toLowerCase();
     if (!isPublicOAuthProvider(provider)) return jsonResponse({ error: "unknown oauth provider" }, 400);
     // Omitted mode is the localhost-callback flow this route has always run.
@@ -273,7 +275,7 @@ export async function handleOauthAccountRoutes(ctx: ManagementContext): Promise<
     // and reauth skip the import. All management login paths require the dashboard
     // principal before credential acquisition. A raw token proves administration,
     // not acknowledgement; caller-supplied headers are not consent evidence.
-    const consentRequired = metaMuseConsentRequired(provider, principal);
+    const consentRequired = metaMuseConsentRequired(provider, ctx);
     if (consentRequired) return consentRequired;
     const namespaceCollision = codexAccountNamespaceProviderCollisionError(config.codexAccountNamespaces, provider);
     if (namespaceCollision) return jsonResponse({ error: namespaceCollision }, 409);
@@ -281,13 +283,28 @@ export async function handleOauthAccountRoutes(ctx: ManagementContext): Promise<
     const reauth = body.reauth === true || Boolean(accountId);
     if (provider === "kiro") {
       if (reauth && !accountId) return jsonResponse({ error: "Kiro reauth requires an accountId" }, 400);
+      if (body.flowId !== undefined) {
+        if (reauth || body.method !== undefined || typeof body.flowId !== "string" || body.flowId.length > 128
+          || typeof body.profileArn !== "string" || body.profileArn.length > 256) return jsonResponse({ error: "invalid Kiro profile selection" }, 400);
+        const owner = principal ?? "admin-token";
+        const baseline = kiroDeviceConfigBaseline(body.flowId, owner);
+        const status = await selectKiroDeviceProfile(body.flowId, owner, body.profileArn);
+        if (!status) return jsonResponse({ error: "unknown Kiro profile selection" }, 404);
+        if (status.state === "done") {
+          reconcileLiveConfigFromDisk(config, baseline ?? structuredClone(config));
+          reconcileLiveStateStores();
+        }
+        return jsonResponse(status);
+      }
       if (body.method !== undefined) {
-        if (body.method !== "builder-id" && body.method !== "google" && body.method !== "github") {
+        if (body.method !== "builder-id" && body.method !== "google" && body.method !== "github" && body.method !== "iam-identity-center") {
           return jsonResponse({ error: "invalid Kiro device method" }, 400);
         }
         if (reauth) return jsonResponse({ error: "native_login_is_add_only" }, 400);
+        const iam = body.method === "iam-identity-center" ? parseKiroIamOptions(body) : undefined;
+        if (body.method === "iam-identity-center" && !iam) return jsonResponse({ error: "invalid Kiro IAM portal or region" }, 400);
         try {
-          return jsonResponse(await startKiroDeviceLogin(body.method as KiroDeviceMethod, principal ?? "admin-token", readConfigDiagnostics().config));
+          return jsonResponse(await startKiroDeviceLogin(body.method as KiroDeviceMethod, principal ?? "admin-token", readConfigDiagnostics().config, iam));
         } catch {
           return jsonResponse({ error: "Kiro device login could not start" }, 409);
         }
@@ -374,7 +391,8 @@ export async function handleOauthAccountRoutes(ctx: ManagementContext): Promise<
     // Without a flow id this cancels the provider's newest in-flight login, which is what the
     // single-user GUI has always meant by "Cancel". A host running concurrent code logins for
     // several users passes the flowId it was given at /api/oauth/login.
-    const cancelled = cancelLoginFlow(provider, typeof body.flowId === "string" ? body.flowId : undefined);
+    const cancelled = cancelLoginFlow(provider, typeof body.flowId === "string" ? body.flowId : undefined,
+      { dismissSettledFailure: true });
     return jsonResponse({ ok: true, cancelled });
   }
 
@@ -389,7 +407,7 @@ export async function handleOauthAccountRoutes(ctx: ManagementContext): Promise<
     const body = await readManagementJsonBodyOr(req, {}) as { provider?: string; input?: string; code?: string; flowId?: unknown };
     const provider = (body.provider ?? "").trim().toLowerCase();
     if (!isPublicOAuthProvider(provider)) return jsonResponse({ error: "unknown oauth provider" }, 400);
-    const consentRequired = metaMuseConsentRequired(provider, principal);
+    const consentRequired = metaMuseConsentRequired(provider, ctx);
     if (consentRequired) return consentRequired;
     const flowId = typeof body.flowId === "string" ? body.flowId : undefined;
     const maskEmails = emailMaskingEnabled(config);
@@ -479,7 +497,8 @@ export async function handleOauthAccountRoutes(ctx: ManagementContext): Promise<
   }
 
   // Multiauth account management: list a provider's logged-in accounts, switch the active
-  // one, or remove one. Emails are masked; tokens never leave the store.
+  // one, or remove one. Emails and accountLabel follow privacy.maskEmails, maskedLabel is always
+  // masked, and tokens never leave the store.
   if (url.pathname === "/api/oauth/accounts" && req.method === "GET") {
     const provider = (url.searchParams.get("provider") ?? "").trim().toLowerCase();
     if (!isPublicOAuthProvider(provider)) return jsonResponse({ error: "unknown oauth provider" }, 400);
@@ -498,7 +517,8 @@ export async function handleOauthAccountRoutes(ctx: ManagementContext): Promise<
     } = await import("../../oauth/health");
     const projectAccounts = () => {
       const set = getAccountSet(provider);
-      const current = getLoginStatus(provider, emailMaskingEnabled(config));
+      const maskEmails = emailMaskingEnabled(config);
+      const current = getLoginStatus(provider, maskEmails);
       return {
         ...(provider === "anthropic2" ? { provider } : {}), activeAccountId: current.activeAccountId ?? null,
         accounts: (current.accounts ?? []).map(summary => {
@@ -509,7 +529,11 @@ export async function handleOauthAccountRoutes(ctx: ManagementContext): Promise<
               needsReauth: summary.needsReauth === true,
               reauthReason: summary.needsReauth === true ? "refresh_failed" : undefined,
             });
-          return { ...summary, ...oauthAccountHealthFields(provider, summary.id, health), quotaMode,
+          const maskedLabel = maskedAccountLabel(full?.credential.email);
+          // `maskedLabel` stays masked for tray surfaces; `accountLabel` follows privacy.maskEmails.
+          const accountLabel = accountDisplayLabel(full?.credential.email, maskEmails);
+          return { ...summary, ...(maskedLabel ? { maskedLabel } : {}), ...(accountLabel ? { accountLabel } : {}),
+            ...oauthAccountHealthFields(provider, summary.id, health), quotaMode,
             ...(supportsPause ? { paused: full?.paused === true, ...(full?.pauseDetails ? { pauseDetails: full.pauseDetails } : {}) } : {}),
             ...(isAnthropicOAuthInstance(provider) && supportsPause ? { autoSwitchThresholdOverride: full?.autoSwitchThresholdOverride ?? null,
               effectiveAutoSwitchThreshold: effectiveAnthropicAccountThresholdForInstance(provider as AnthropicInstanceId, config, full),
@@ -554,6 +578,19 @@ export async function handleOauthAccountRoutes(ctx: ManagementContext): Promise<
       }),
     });
   }
+  if (url.pathname === "/api/oauth/accounts/affinity-reset" && req.method === "PUT") {
+    const body = await readManagementJsonBodyOr(req, {});
+    if (!isPlainRecord(body)) return jsonResponse({ error: "body must be an object" }, 400);
+    const provider = typeof body.provider === "string" ? body.provider.trim().toLowerCase() : "";
+    if (!isPublicOAuthProvider(provider) || !isAnthropicOAuthInstance(provider)) {
+      return jsonResponse({ error: "session-affinity reset is only supported for Anthropic OAuth instances" }, 400);
+    }
+    const { anthropicRoutingFor } = await import("../../oauth/anthropic-routing");
+    if (!await anthropicRoutingFor(provider).resetAnthropicSessionAffinityConfirmed()) {
+      return jsonResponse({ code: "affinity_reset_not_persisted", provider, retryable: true }, 503);
+    }
+    return jsonResponse({ ok: true, provider, affinityResetConfirmed: true });
+  }
   if (url.pathname === "/api/oauth/accounts/active" && req.method === "PUT") {
     const body = await readManagementJsonBodyOr(req, {}) as { provider?: string; accountId?: string };
     const provider = (body.provider ?? "").trim().toLowerCase();
@@ -577,15 +614,20 @@ export async function handleOauthAccountRoutes(ctx: ManagementContext): Promise<
     // side carries resetCodexRoutingForManualSelection for.
     const { genericPoolKey, seedPoolRotationAccount } = await import("../../oauth/pool-kernel");
     seedPoolRotationAccount(genericPoolKey(provider), body.accountId);
-    if (isAnthropicOAuthInstance(provider)) {
-      const { anthropicRoutingFor } = await import("../../oauth/anthropic-routing");
-      anthropicRoutingFor(provider).resetAnthropicRoutingForManualSelection(body.accountId);
-    }
+    const anthropicRouting = isAnthropicOAuthInstance(provider)
+      ? (await import("../../oauth/anthropic-routing")).anthropicRoutingFor(provider) : undefined;
+    anthropicRouting?.resetAnthropicRoutingForManualSelection(body.accountId);
+    const affinityReset = anthropicRouting?.flushAnthropicManualSelectionReset();
     const { clearModelCache } = await import("../../codex/model-cache");
     const { clearGatherRoutedModelsInflight } = await import("../../codex/catalog");
     clearModelCache(provider);
     clearGatherRoutedModelsInflight();
     clearQuotaCachesAfterAccountMutation(provider, false);
+    if (affinityReset && !await affinityReset) {
+      return jsonResponse({ error: "Account selection was saved, but its session-affinity reset was not persisted. Retry the selection.",
+        code: "affinity_reset_not_persisted", provider, activeAccountId: body.accountId,
+        selectionCommitted: true, retryable: true }, 503);
+    }
     return jsonResponse({ ok: true, provider, activeAccountId: body.accountId });
   }
 
@@ -599,6 +641,15 @@ export async function handleOauthAccountRoutes(ctx: ManagementContext): Promise<
       return jsonResponse({ error: "missing accountId" }, 400);
     }
     if (typeof body.paused !== "boolean") return jsonResponse({ error: "paused must be a boolean" }, 400);
+    if (body.retryAffinityReset !== undefined && typeof body.retryAffinityReset !== "boolean") {
+      return jsonResponse({ error: "retryAffinityReset must be a boolean" }, 400);
+    }
+    if (body.ifHealthy !== undefined && typeof body.ifHealthy !== "boolean") {
+      return jsonResponse({ error: "ifHealthy must be a boolean" }, 400);
+    }
+    if (body.ifHealthy === true && body.paused !== false) {
+      return jsonResponse({ error: "ifHealthy applies only to a resume (paused: false)" }, 400);
+    }
 
     const { isGenericFailoverProvider } = await import("../../oauth/generic-account-failover");
     const effectiveProvider = genericOAuthProviderConfig(provider, config);
@@ -608,14 +659,44 @@ export async function handleOauthAccountRoutes(ctx: ManagementContext): Promise<
     }
 
     const { setAccountPaused } = await import("../../oauth/store");
-    const result = await setAccountPaused(provider, body.accountId, body.paused);
+    let resumeGuard: { generation: string; pauseRevision: string | undefined } | undefined;
+    if (body.ifHealthy === true) {
+      // Explicit resume gated on an account-bound health read (#8398); an unpaused account needs none.
+      const { checkOAuthResumeHealth } = await import("../../oauth/account-resume-health");
+      const verdict = await checkOAuthResumeHealth(provider, body.accountId);
+      if (verdict && !verdict.ok) {
+        return jsonResponse({ error: `account was not resumed: ${verdict.reason}`, code: "resume_refused", reason: verdict.reason,
+          provider, accountId: body.accountId }, 409);
+      }
+      if (!verdict) {
+        // Not paused when checked: write nothing, so a pause that lands meanwhile is never cleared unchecked.
+        const { getAccountSet } = await import("../../oauth/store");
+        const set = getAccountSet(provider);
+        if (!set?.accounts.some(account => account.id === body.accountId)) return jsonResponse({ error: "account not found" }, 404);
+        return jsonResponse({ ok: true, provider, accountId: body.accountId, paused: false, unchanged: true,
+          activeAccountId: set.activeAccountId, activeAccountChanged: false });
+      }
+      resumeGuard = { generation: verdict.generation, pauseRevision: verdict.pauseRevision };
+    }
+    const result = await setAccountPaused(provider, body.accountId, body.paused, undefined, resumeGuard);
     if (result.status === "not-found") return jsonResponse({ error: "account not found" }, 404);
+    if (result.status === "changed") {
+      return jsonResponse({ error: "account was not resumed: account_changed", code: "resume_refused", reason: "account_changed",
+        provider, accountId: body.accountId }, 409);
+    }
 
+    const anthropicRouting = isAnthropicOAuthInstance(provider)
+      ? (await import("../../oauth/anthropic-routing")).anthropicRoutingFor(provider) : undefined;
+    let affinityReset: Promise<boolean> | undefined;
+    // Explicit retries rebuild reset intent after a server restart lost the in-memory marker.
+    if (anthropicRouting && result.activeAccountChanged) {
+      anthropicRouting.resetAnthropicRoutingForManualSelection(result.activeAccountId);
+      affinityReset = anthropicRouting.flushAnthropicManualSelectionReset();
+    } else if (anthropicRouting && body.retryAffinityReset === true) {
+      affinityReset = anthropicRouting.resetAnthropicSessionAffinityConfirmed();
+    }
     if (result.activeAccountChanged) {
-      if (isAnthropicOAuthInstance(provider)) {
-        const { anthropicRoutingFor } = await import("../../oauth/anthropic-routing");
-        anthropicRoutingFor(provider).resetAnthropicRoutingForManualSelection(result.activeAccountId);
-      } else {
+      if (!anthropicRouting) {
         const { genericPoolKey, seedPoolRotationAccount } = await import("../../oauth/pool-kernel");
         seedPoolRotationAccount(genericPoolKey(provider), result.activeAccountId);
       }
@@ -626,6 +707,14 @@ export async function handleOauthAccountRoutes(ctx: ManagementContext): Promise<
       clearQuotaCachesAfterAccountMutation(provider, false);
     }
 
+    // Inactive pauses also publish invalidation before success; an unchanged retry drains it.
+    affinityReset ??= anthropicRouting?.flushAnthropicAccountPause();
+    if (affinityReset && !await affinityReset) {
+      return jsonResponse({ error: "Account pause was saved, but its session-affinity reset was not persisted. Retry with the same pause state and retryAffinityReset: true.",
+        code: "affinity_reset_not_persisted", provider, accountId: body.accountId, paused: body.paused,
+        activeAccountId: result.activeAccountId, activeAccountChanged: result.activeAccountChanged,
+        pauseCommitted: true, retryable: true }, 503);
+    }
     return jsonResponse({
       ok: true,
       provider,
@@ -1016,13 +1105,24 @@ export async function handleOauthAccountRoutes(ctx: ManagementContext): Promise<
     const id = url.searchParams.get("id") ?? "";
     if (!isPublicOAuthProvider(provider)) return jsonResponse({ error: "unknown oauth provider" }, 400);
     if (!id) return jsonResponse({ error: "missing id" }, 400);
+    const retryReset = url.searchParams.get("retryAffinityReset");
+    if (retryReset !== null && retryReset !== "true" && retryReset !== "false") {
+      return jsonResponse({ error: "retryAffinityReset must be true or false" }, 400);
+    }
+    if (retryReset === "true" && !isAnthropicOAuthInstance(provider)) {
+      return jsonResponse({ error: "session-affinity reset is only supported for Anthropic OAuth instances" }, 400);
+    }
     const { removeAccount, getAccountSet } = await import("../../oauth/store");
     if (!(await removeAccount(provider, id))) return jsonResponse({ error: "account not found" }, 404);
     reconcileLiveStateStores();
+    let affinityReset: Promise<boolean> | undefined;
     if (isAnthropicOAuthInstance(provider)) {
       const { anthropicRoutingFor } = await import("../../oauth/anthropic-routing");
-      anthropicRoutingFor(provider).clearAnthropicAccountCooldown(id);
-      anthropicRoutingFor(provider).clearAnthropicSessionAffinityForAccount(id);
+      const routing = anthropicRoutingFor(provider);
+      routing.clearAnthropicAccountCooldown(id);
+      routing.clearAnthropicSessionAffinityForAccount(id);
+      affinityReset = retryReset === "true" ? routing.resetAnthropicSessionAffinityConfirmed()
+        : routing.flushAnthropicManualSelectionReset();
     }
     if (!getAccountSet(provider)) clearLoginState(provider);
     const { clearModelCache } = await import("../../codex/model-cache");
@@ -1034,7 +1134,11 @@ export async function handleOauthAccountRoutes(ctx: ManagementContext): Promise<
     // leave the JWT and catalog in memory, because only the logout route cleared
     // them.
     if (isDevinCloudDirectProvider(provider)) await clearDevinCloudDirectCaches();
-    return jsonResponse({ ok: true });
+    if (affinityReset && !await affinityReset) {
+      return jsonResponse({ code: "affinity_reset_not_persisted", provider, accountId: id,
+        deletionCommitted: true, retryable: true }, 503);
+    }
+    return jsonResponse({ ok: true, ...(retryReset === "true" ? { affinityResetConfirmed: true } : {}) });
   }
 
   // Multi-key pool for API-key providers (same GUI dropdown as OAuth multiauth): list masked
@@ -1121,9 +1225,9 @@ export async function handleOauthAccountRoutes(ctx: ManagementContext): Promise<
     if (!isPlainRecord(body)) return jsonResponse({ error: "body must be an object" }, 400);
     if (typeof body.name !== "string" || typeof body.id !== "string" || typeof body.paused !== "boolean") return jsonResponse({ error: "name, id and paused required" }, 400);
     if (!isValidProviderName(body.name) || !hasOwnProvider(config.providers, body.name)) return jsonResponse({ error: "unknown provider" }, 404);
-    const { setProviderApiKeyPaused } = await import("../../providers/api-key-pause");
-    return setProviderApiKeyPaused(config, body.name, body.id, body.paused)
-      ? jsonResponse({ ok: true }) : jsonResponse({ error: "key not found" }, 404);
+    const { setProviderApiKeyPausedWithResult } = await import("../../providers/api-key-pause");
+    const result = setProviderApiKeyPausedWithResult(config, body.name, body.id, body.paused);
+    return result.ok ? jsonResponse(result) : jsonResponse({ error: "key not found" }, 404);
   }
   if (url.pathname === "/api/providers/keys/active" && req.method === "PUT") {
     const body = await readManagementJsonBodyOr(req, {}) as { name?: string; id?: string };

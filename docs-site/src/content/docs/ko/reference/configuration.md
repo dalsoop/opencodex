@@ -27,6 +27,11 @@ opencodex는 지속 설정을 `$OPENCODEX_HOME/config.json`에 저장합니다. 
 남긴 뒤 기본값으로 시작합니다. 파일이 없어도 새로 설치한 경우의 기본값을 그대로 사용하며, 그것은 단일
 `openai` forward 프로바이더입니다.
 
+로컬 `ocx config set`, `unset`, `import`, 오프라인 `ocx effort`, 커스텀 모델 추가·삭제,
+프로바이더 추가·삭제·기본값 변경은 기존 `config.json`이 유효하지 않거나 읽을 수 없으면
+원본 바이트를 바꾸지 않고 거부합니다. `ocx config validate`로 확인하고 파일을 고친 뒤
+다시 실행하세요. import도 기존 설정 파일이 있다면 읽을 수 있고 유효한 대상 파일을 요구합니다.
+
 ## 우선순위와 기본값
 
 `config.json`의 유효한 값은 내장 기본값보다 우선합니다. 선택 사항으로 비어 있는 필드는 각 도메인 페이지에
@@ -60,5 +65,7 @@ account id와 이메일도 공개하지 않는 편이 좋으니, 가능하면 �
 opencodex는 관리형 `config.toml`과 `opencodex-catalog.json` 파일을 임시 파일로 쓴 뒤 rename하는
 방식(`atomicWriteFile`)으로 저장합니다.
 이렇게 하면 `ocx stop`과 프록시 종료 handler처럼 동시에 실행되는 writer가 Codex를 되돌릴 때도
-부분 파일이 생기지 않습니다.
+부분 파일이 생기지 않습니다. Windows에서 `opencodex-catalog.json`에 읽기 전용 속성이 있어
+rename이 거부되면 opencodex가 속성을 해제하고 한 번만 재시도합니다. 그래도 실패하면 원시 `EPERM` 대신
+`Codex catalog is read-only: <path>`를 보고합니다.
 :::

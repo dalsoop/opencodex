@@ -21,15 +21,16 @@
  */
 import { homedir } from "node:os";
 import { gentleShellPaths } from "./gentle-shell-path";
-import { absoluteClientPath, ClientPathError, piAgentDir } from "./client-path";
+import { absoluteClientPath, ClientPathError, isAbsoluteClientPath, piAgentDir } from "./client-path";
 export { ClientPathError, piAgentDir } from "./client-path";
 import { existsSync, lstatSync, readFileSync, realpathSync, statSync } from "node:fs";
-import { basename, dirname, isAbsolute, join, resolve, win32 } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { shouldInjectApiAuthHeader, standaloneCodexRoutingTarget } from "../codex/inject";
 import { FORMAT_MEDIA_TYPE, serializeDocument, type ConfigFormat } from "../integrations/serialize";
 import { fileIO } from "../integrations/config-io";
 import { canonicalizeReasoningEfforts } from "../reasoning-effort";
 import { expandFastExportModels } from "./config-export/fast-models";
+import { namedExportContext } from "./config-export/alias-selectors";
 import { probeHostname } from "../server/proxy-liveness";
 import type { OcxConfig } from "../types";
 
@@ -59,7 +60,7 @@ export { buildRaycastClientConfig, summarizeRaycast, buildRaycastContribution } 
 export { droidHomeDir, droidConfigPath, buildDroidClientConfig, summarizeDroid, buildDroidContribution, droidReasoningModels, droidDefaultsFromOwnedRows, validateDroidReasoningDefaults } from "./config-export/droid";
 export type { DroidModelEntry, DroidGeneratedConfig } from "./config-export/droid";
 
-import type { OpencodeLaunchEnv, OpencodeCatalogModel, ExportContext, PiModelEntry, ManagedContribution, ManagedFragment, ExportClientId, ExportClientSpec } from "./config-export/contracts";
+import type { ExportModel, OpencodeLaunchEnv, OpencodeCatalogModel, ExportContext, PiModelEntry, ManagedContribution, ManagedFragment, ExportClientId, ExportClientSpec } from "./config-export/contracts";
 import { OPENCODE_API_KEY_ENV_REF, OPENCODE_PROVIDER_BLOCK_DEFAULT_CONFIG, OPENCODE_CONFIG_SCHEMA, OPENCODE_PROVIDER_ID, PI_API_DIALECT, LOOPBACK_API_KEY_PLACEHOLDER, HERMES_API_KEY_ENV_REF, OPENCLAW_API_KEY_ENV_REF, OPENCODE_API_KEY_ENV, HERMES_API_KEY_ENV, OPENCLAW_API_KEY_ENV, KILO_API_KEY_ENV } from "./config-export/constants";
 import { exportModelLabel, authoritativeContextWindow, outputBudgetFor, inputBudgetFor, normalizeExportModels, inputModalitiesForClient, opencodeModelCapabilities, proxyAdmissionHeaders, singleFragment } from "./config-export/model-metadata";
 import { exportReasoningEfforts, exportDefaultReasoningEffort, legacyReasoningMetadata, type LegacyEffortVariant } from "./config-export/reasoning-metadata";
@@ -85,8 +86,11 @@ import {
 
 export type { CommandCodeGeneratedConfig, CommandCodeModelEntry, CommandCodeProviderBlock };
 export { buildCommandCodeClientConfig, summarizeCommandCode, buildCommandCodeContribution, commandCodeProviderRoot };
+import { agentConfigPath, buildQoderCnClientConfig, buildQoderCnContribution, buildWorkbuddyClientConfig, buildWorkbuddyContribution, summarizeWorkbuddy, workbuddyApplyRefusal } from "./config-export/agent-clients";
 import { buildQoderClientConfig, summarizeQoder, buildQoderContribution, qoderConfigPath } from "./config-export/qoder";
 export { buildQoderClientConfig, qoderConfigPath, qoderHomeDir, type QoderGeneratedConfig } from "./config-export/qoder";
+import { buildT3CodeClientConfig, summarizeT3Code, buildT3CodeContribution, t3codeApplyRefusal, t3codeConfigPath } from "./config-export/t3code";
+export { buildT3CodeClientConfig, t3codeConfigPath, t3codeHomeDir, type T3CodeGeneratedConfig } from "./config-export/t3code";
 
 
 
@@ -132,6 +136,18 @@ export interface OpencodeProviderConnection {
   baseURL: string;
   apiKey?: string;
   headers?: Record<string, string>;
+  /**
+   * opencode's own client-side wait for the proxy's first response header, in ms, or `false`
+   * to disable it. Emitted only when `opencodeClientExport.headerTimeoutMs` is set. opencode's
+   * default is 300000 (5 min); a slow local model's prompt prefill behind a non-streaming turn
+   * can exceed it, so the proxy sends no bytes and opencode's header wait fires ("Timed out
+   * waiting for response headers").
+   */
+  headerTimeout?: number | false;
+  /** opencode's wait between streamed response chunks (ms) or `false`; emitted from `chunkTimeoutMs`. */
+  chunkTimeout?: number | false;
+  /** opencode's whole-request bound (ms) or `false`; emitted from `timeoutMs`. opencode has no default. */
+  timeout?: number | false;
 }
 
 /** opencode V1 provider block: `npm` + `options`. */
@@ -394,10 +410,10 @@ export function dshHomeDir(env: OpencodeLaunchEnv = process.env, home: string = 
   if (raw === undefined || raw.trim().length === 0) return join(home, ".dsh");
   if (raw === "~") return home;
   if (raw.startsWith("~/") || raw.startsWith("~\\")) return join(home, raw.slice(2));
-  if (!isAbsolute(raw)) {
+  if (!isAbsoluteClientPath(raw)) {
     throw new ClientPathError(
       `DSH_HOME must be an absolute path or start with ~; "${raw}" depends on the working directory, `
-      + "so opencodex and DSH would disagree about which settings file it names.",
+      + "so opencodex and DSH would disagree about which settings file it names. Use a drive letter or UNC share on Windows.",
     );
   }
   // DSH calls node:path.resolve after tilde expansion. Preserve the raw value
@@ -469,7 +485,7 @@ export function zcodeHomeDir(env: OpencodeLaunchEnv = process.env, home: string 
   if (base === undefined) return join(home, ".zcode");
   // Match the native path's value, without cwd or tilde expansion. The native
   // ZCODE_DATA_BASE_DIR selector is not an alias for our ZCODE_DATA_DIR.
-  if (typeof base !== "string" || !isAbsolute(base) || base.includes("\0")) throw unknown();
+  if (typeof base !== "string" || !isAbsoluteClientPath(base) || base.includes("\0")) throw unknown();
   return join(base, ".zcode");
 }
 
@@ -491,7 +507,7 @@ export function zcodeConfigPath(env: OpencodeLaunchEnv = process.env, home: stri
 export function commandCodeUserHome(env: OpencodeLaunchEnv = process.env, home: string = homedir(), platform: NodeJS.Platform = process.platform): string {
   if (platform !== "win32" || home !== homedir()) return home;
   const value = env.HOME ?? env.USERPROFILE;
-  return typeof value === "string" && value.trim() && win32.isAbsolute(value) ? value : home;
+  return typeof value === "string" && value.trim() && isAbsoluteClientPath(value, platform) ? value : home;
 }
 
 /**
@@ -512,6 +528,19 @@ export function commandCodeHomeDir(env: OpencodeLaunchEnv = process.env, home: s
 
 export function commandCodeConfigPath(env: OpencodeLaunchEnv = process.env, home: string = homedir(), platform: NodeJS.Platform = process.platform): string {
   return join(commandCodeHomeDir(env, home, platform), "providers.json");
+}
+
+/**
+ * Command Code's credential store, next to the provider file.
+ *
+ * Only the DESKTOP app reads this before it will show a workspace; the published
+ * CLI is content with `apiKey: false` in `providers.json`. It is the vendor's file,
+ * shared with real logins and other providers' tokens, so this integration NEVER
+ * writes it: the desktop user signs in themselves. Exported so callers and tests
+ * can name the path they must leave alone.
+ */
+export function commandCodeAuthPath(env: OpencodeLaunchEnv = process.env, home: string = homedir(), platform: NodeJS.Platform = process.platform): string {
+  return join(commandCodeHomeDir(env, home, platform), "auth.json");
 }
 
 /**
@@ -709,6 +738,17 @@ export function raycastConfigPath(env: OpencodeLaunchEnv = process.env, home: st
 /** Endpoint plus admission, identical for the V1 `options` and V2 `settings` field. */
 function opencodeProviderConnection(baseURL: string, config: OcxConfig): OpencodeProviderConnection {
   const options: OpencodeProviderConnection = { baseURL };
+  // Opt-in opencode-side timeout overrides. Omitted by default so opencode keeps its native
+  // header/chunk waits for every upstream routed through the proxy (current V2 defaults the
+  // header wait to 5 min and the longer chunk wait to 15 min, but this repo pins no opencode
+  // release); a user fronting a slow local model sets these to extend or disable the wait that
+  // otherwise cuts a long prefill.
+  const timeouts = config.opencodeClientExport;
+  if (timeouts) {
+    if (timeouts.headerTimeoutMs !== undefined) options.headerTimeout = timeouts.headerTimeoutMs;
+    if (timeouts.chunkTimeoutMs !== undefined) options.chunkTimeout = timeouts.chunkTimeoutMs;
+    if (timeouts.timeoutMs !== undefined) options.timeout = timeouts.timeoutMs;
+  }
   // Non-loopback binds accept proxy admission only via x-opencodex-api-key so Authorization
   // stays free for Codex Direct upstream credentials when applicable.
   if (shouldInjectApiAuthHeader(config)) {
@@ -879,6 +919,8 @@ interface PiExportOptions {
    * states it rather than leaving each user to hand-edit a block the next export rewrites.
    */
   foldDeveloperRole?: boolean;
+  /** Provider dialect; omitted writes `PI_API_DIALECT`. */
+  api?: "openai-completions" | "openai-responses";
 }
 
 export interface PiGeneratedConfig {
@@ -945,13 +987,36 @@ export interface KimiProviderBlock {
  * authoritative context window is omitted from the document entirely rather
  * than guessed at. Catalog image input becomes `image_in`; other capabilities
  * are not inferred from routed model names.
+ * A declared effort ladder becomes `support_efforts` (limited to Kimi Code's
+ * documented levels) plus the `thinking` capability, and a declared default in
+ * that ladder becomes `default_effort` (#8095).
  */
 export interface KimiModelBlock {
   provider: string;
   model: string;
   max_context_size: number;
   display_name?: string;
-  capabilities?: ["image_in"];
+  capabilities?: Array<"thinking" | "image_in">;
+  support_efforts?: KimiEffort[];
+  default_effort?: KimiEffort;
+}
+
+/** Kimi Code's thinking efforts, in its documented order; anything else fails its config validation. */
+const KIMI_EFFORT_ORDER = ["low", "medium", "high", "xhigh", "max"] as const;
+type KimiEffort = typeof KIMI_EFFORT_ORDER[number];
+
+function kimiEfforts(model: ExportModel): { support_efforts?: KimiEffort[]; default_effort?: KimiEffort } {
+  // An explicit "no reasoning" declaration outranks any ladder that reached the exporter.
+  if (model.supportsReasoning === false || model.supportsReasoningEffort === false) return {};
+  const offered = new Set((model.reasoningEfforts ?? [])
+    .filter((effort): effort is string => typeof effort === "string")
+    .map(effort => effort.trim().toLowerCase()));
+  const support = KIMI_EFFORT_ORDER.filter(effort => offered.has(effort));
+  if (support.length === 0) return {};
+  const declared = typeof model.defaultReasoningEffort === "string"
+    ? model.defaultReasoningEffort.trim().toLowerCase() : undefined;
+  const fallback = support.find(effort => effort === declared);
+  return { support_efforts: support, ...(fallback ? { default_effort: fallback } : {}) };
 }
 
 export interface KimiGeneratedConfig {
@@ -1058,7 +1123,7 @@ function buildPiClientConfig(ctx: ExportContext, options: PiExportOptions = {}):
     providers: {
       [OPENCODE_PROVIDER_ID]: {
         baseUrl: ctx.baseUrl,
-        api: PI_API_DIALECT,
+        api: options.api ?? PI_API_DIALECT,
         apiKey: LOOPBACK_API_KEY_PLACEHOLDER,
         ...(Object.keys(compat).length > 0 ? { compat } : {}),
         models,
@@ -1147,12 +1212,18 @@ function buildKimiClientConfig(ctx: ExportContext): KimiGeneratedConfig {
     // so a model without an authoritative window is left out rather than
     // shipped with a number we invented.
     if (context === undefined) continue;
+    const efforts = kimiEfforts(model);
+    const capabilities: Array<"thinking" | "image_in"> = [
+      ...(efforts.support_efforts ? ["thinking" as const] : []),
+      ...(model.inputModalities?.includes("image") ? ["image_in" as const] : []),
+    ];
     models[kimiModelAlias(model.namespaced)] = {
       provider: OPENCODE_PROVIDER_ID,
       model: model.namespaced,
       max_context_size: context,
       ...(model.displayName ? { display_name: model.displayName } : {}),
-      ...(model.inputModalities?.includes("image") ? { capabilities: ["image_in"] as ["image_in"] } : {}),
+      ...(capabilities.length > 0 ? { capabilities } : {}),
+      ...efforts,
     };
   }
   return {
@@ -1364,10 +1435,19 @@ function buildAsideContribution(ctx: ExportContext): ManagedContribution {
  * are consistent; passing it on only one would make `ocx export --client omo`
  * emit a `compat` block while enable and refresh wrote a file without it, and
  * the two would drift apart at the first refresh.
+ *
+ * The same rule covers the opt-in `omoClientExport.api` dialect (#7431): both paths read it from
+ * the live config, so a refresh keeps the Responses dialect instead of reverting it to Chat.
  */
 function buildOmoContribution(ctx: ExportContext): ManagedContribution {
-  const doc = buildPiClientConfig(ctx, PI_EXPORT_OPTIONS);
+  const doc = buildPiClientConfig(ctx, omoExportOptions(ctx));
   return singleFragment("omo", ["providers", OPENCODE_PROVIDER_ID], doc.providers[OPENCODE_PROVIDER_ID]);
+}
+
+function omoExportOptions(ctx: ExportContext): PiExportOptions {
+  return ctx.config?.omoClientExport?.api === "openai-responses"
+    ? { ...PI_EXPORT_OPTIONS, api: "openai-responses" }
+    : PI_EXPORT_OPTIONS;
 }
 
 /** Cline's shared SDK store; command-local --config must be mirrored by the env override. */
@@ -1401,6 +1481,17 @@ export const EXPORT_CLIENTS: Record<ExportClientId, ExportClientSpec> = {
     buildContribution: buildQoderContribution,
     loopbackOnly: true,
   },
+  "qoder-cn": {
+    id: "qoder-cn", filename: "qoder-cn-settings.json", destination: env => agentConfigPath("qoder-cn", env),
+    apiKeyEnv: "", exportHint: "Qoder CN uses a non-secret loopback placeholder.", format: "json",
+    build: buildQoderCnClientConfig, summarize: summarizeQoder, buildContribution: buildQoderCnContribution, loopbackOnly: true,
+  },
+  ...Object.fromEntries((["workbuddy", "workbuddy-ai"] as const).map(id => [id, {
+    id, filename: `${id}-models.json`, destination: (env: NodeJS.ProcessEnv) => agentConfigPath(id, env),
+    apiKeyEnv: "", exportHint: "WorkBuddy uses a non-secret loopback placeholder.", format: "json" as const,
+    build: buildWorkbuddyClientConfig, summarize: summarizeWorkbuddy, validateApply: workbuddyApplyRefusal,
+    buildContribution: (ctx: ExportContext) => buildWorkbuddyContribution(id, ctx), loopbackOnly: true,
+  }])) as Record<"workbuddy" | "workbuddy-ai", ExportClientSpec>,
   opencode: {
     id: "opencode",
     filename: "opencode.json",
@@ -1545,7 +1636,7 @@ export const EXPORT_CLIENTS: Record<ExportClientId, ExportClientSpec> = {
     // No env var exists behind this integration: buildCommandCodeClientConfig
     // writes `apiKey: false`, the documented keyless form for a loopback endpoint.
     apiKeyEnv: "",
-    exportHint: "The provider is written with `apiKey: false` — Command Code treats a keyless loopback endpoint as already authenticated. No key is stored or referenced.",
+    exportHint: "The provider is written with `apiKey: false`, the keyless form the CLI accepts. The desktop app needs its own Command Code sign-in; opencodex never writes `~/.commandcode/auth.json`.",
     build: buildCommandCodeClientConfig,
     format: "json",
     summarize: summarizeCommandCode,
@@ -1603,11 +1694,8 @@ export const EXPORT_CLIENTS: Record<ExportClientId, ExportClientSpec> = {
     loopbackOnly: true,
   },
   /*
-   * Appended rather than filed beside the other Pi-family clients on purpose.
-   * `EXPORT_CLIENT_IDS` is `Object.keys(EXPORT_CLIENTS)`, so this object's
-   * insertion order IS the public order, and three tests assert it exactly. The
-   * existing sequence is landing order — `pi` second, `prime` eleventh — not a
-   * grouping, so appending is the edit that leaves the other thirteen alone.
+   * The shared client roster preserves public landing order, not family grouping.
+   * Keep this registry in the same order so its iteration agrees with the roster.
    */
   omo: {
     id: "omo",
@@ -1617,7 +1705,7 @@ export const EXPORT_CLIENTS: Record<ExportClientId, ExportClientSpec> = {
     destination: env => omoConfigPath(env),
     apiKeyEnv: "",
     exportHint: "omo reads a non-secret placeholder from models.json; loopback needs no key.",
-    build: ctx => buildPiClientConfig(ctx, PI_EXPORT_OPTIONS),
+    build: ctx => buildPiClientConfig(ctx, omoExportOptions(ctx)),
     format: "json",
     summarize: summarizePi,
     buildContribution: buildOmoContribution,
@@ -1685,9 +1773,22 @@ export const EXPORT_CLIENTS: Record<ExportClientId, ExportClientSpec> = {
     },
     loopbackOnly: true,
   },
+  t3code: {
+    id: "t3code",
+    filename: "t3code-settings.json",
+    destination: env => t3codeConfigPath(env),
+    apiKeyEnv: "",
+    exportHint: "Merge providerInstances.opencodex into T3 Code's settings.json; it reloads the file. Loopback needs no key.",
+    build: buildT3CodeClientConfig,
+    format: "json",
+    summarize: summarizeT3Code,
+    validateApply: t3codeApplyRefusal,
+    buildContribution: buildT3CodeContribution,
+    loopbackOnly: true,
+  },
 };
 
-export const EXPORT_CLIENT_IDS: readonly ExportClientId[] = Object.keys(EXPORT_CLIENTS) as ExportClientId[];
+export { EXPORT_CLIENT_IDS } from "./client-ids";
 
 export function isExportClientId(value: string): value is ExportClientId {
   return Object.prototype.hasOwnProperty.call(EXPORT_CLIENTS, value);
@@ -1695,7 +1796,7 @@ export function isExportClientId(value: string): value is ExportClientId {
 
 /** Single entry point every export surface calls. */
 export function buildClientConfig(client: ExportClientId, ctx: ExportContext): unknown {
-  return EXPORT_CLIENTS[client].build(ctx);
+  return EXPORT_CLIENTS[client].build(namedExportContext(client, ctx));
 }
 
 /**
@@ -1709,7 +1810,7 @@ export function buildClientConfigText(
   ctx: ExportContext,
 ): { document: unknown; text: string; format: ConfigFormat; mediaType: string } {
   const spec = EXPORT_CLIENTS[client];
-  const document = spec.build(ctx);
+  const document = spec.build(namedExportContext(client, ctx));
   return {
     document,
     text: serializeDocument(document, spec.format),
@@ -1720,5 +1821,5 @@ export function buildClientConfigText(
 
 /** The fragments opencodex owns in a client's config (writer-side). */
 export function buildClientContribution(client: ExportClientId, ctx: ExportContext): ManagedContribution {
-  return EXPORT_CLIENTS[client].buildContribution(ctx);
+  return EXPORT_CLIENTS[client].buildContribution(namedExportContext(client, ctx));
 }
