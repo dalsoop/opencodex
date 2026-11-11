@@ -561,15 +561,13 @@ export interface OcxConfig {
   managementUsageMaxReadBytes?: number;
   providers: Record<string, OcxProviderConfig>;
   defaultProvider: string;
-  /** Persisted discovery choices; new models default off, with the configured default visible at bootstrap. */
+  /** Persisted state for newly discovered provider models (#2464). Absent keeps legacy "on" behavior. */
   modelDiscovery?: {
     newModelPolicy?: "on" | "off";
     knownModels?: Record<string, {
       ids: string[];
       removed: string[];
       updatedAt: string;
-      /** The initial default-only projection ran; later switch edits must never be reset. */
-      visibilityInitialized?: boolean;
       /** Consecutive successful discoveries in which an active id was absent. */
       missing?: Record<string, number>;
     }>;
