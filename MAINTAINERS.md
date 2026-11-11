@@ -16,13 +16,14 @@ review and merge policy.
 
 | GitHub account | Project role | Responsibilities |
 | --- | --- | --- |
-| [@dalsoop](https://github.com/dalsoop) | Repository owner | Independent repository administration, integration, installation and CI |
+| [@lidge-jun](https://github.com/lidge-jun) | Project owner | Project direction, releases, repository administration, and final governance decisions |
+| [@Ingwannu](https://github.com/Ingwannu) | Maintainer | Issue and pull-request triage, `dev` integration, security review, and repository maintenance |
 
 The table describes project responsibilities. Actual repository permissions remain controlled
 through GitHub repository settings.
 
-The original project's maintainers and governance are recorded in the inherited
-history. The remaining sections below describe that project's policy.
+`dev` is the only integration line. The former `dev2-go` carry duty is retired;
+see [The retired `dev2-go` line](#the-retired-dev2-go-line).
 
 ## Former maintainers
 
