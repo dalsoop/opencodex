@@ -1605,8 +1605,7 @@ export function createServeOptions(ctx: ServeOptionsContext) {
           req,
           policy,
         )), { requestId, start, logCtx, onLogged: () => { ownsRequestLog = true; } });
-        return await withMessagesKeepalive(sessionReq, turn, resolveMessagesKeepaliveSettings(), { // pings while it waits
-          finish: r => ownsRequestLog ? withMessagesRequestLogId(r, requestId) : r, finishCommitted: r => withMessagesRequestLogId(withCors(r, req, policy), requestId) });
+        return await withMessagesKeepalive(sessionReq, turn, resolveMessagesKeepaliveSettings(), { finish: r => ownsRequestLog ? withMessagesRequestLogId(r, requestId) : r, finishCommitted: r => withMessagesRequestLogId(withCors(r, req, policy), requestId) }); // pings while it waits
       }
 
       // OpenAI Chat Completions inbound (GitHub Copilot App / OpenAI-compatible clients).
