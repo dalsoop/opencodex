@@ -431,7 +431,7 @@ export async function listCodexAuthAccountsSnapshot(
     const mainIdentity = mainSnapshotLive && getObservedMainCodexCollisionIdentity() === observedMainIdentity
       ? observedMainIdentity : undefined;
     const mainAccountKey = codexUpstreamAccountKey(identitySecret, mainIdentity?.accountId, mainIdentity?.userId);
-    // Reuse the existing identity/credits token read; subscription dates never request a refresh.
+    // Subscription dates come from the stored main Codex tokens; this read never requests a refresh.
     const mainTokens = readCodexTokens();
     const mainAccountId = getMainChatgptAccountId(mainTokens);
     // A passive read may retain the previous login's metadata after auth.json changes.
