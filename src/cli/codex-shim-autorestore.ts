@@ -33,9 +33,6 @@ export function skipsCodexShimAutoRestore(command: string | undefined, args: str
   // or future actions. A later `apply` implementation must own its preflight.
   if (command === "system" && args[1] === "codex-cli-update") return true;
   if (command === "__update-badge") return true;
-  // The server runs this probe under startupHealthProbeBudgetMs(); a repair started here is
-  // killed mid-publication and leaves its staged files and probe directory behind.
-  if (command === "__startup-health") return true;
   return command === "codex-shim" && ["install", "status", "uninstall", "remove"].includes(args[1] ?? "");
 }
 
