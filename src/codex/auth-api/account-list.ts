@@ -1,7 +1,6 @@
 import { getMainAccountExternalUsageWarning, type MainAccountExternalUsageWarning } from "../main-account-external-usage";
 import { codexCreditsDtoField, hasCodexCreditsObservation, pruneCodexCredits } from "../credits";
 import type { CodexCredits } from "../credits";
-import { getMainChatgptAccountId, readCodexTokens } from "../auth-collision";
 import { codexAccountLogLabel } from "../account-label";
 import { poolQuotaHistoryIdentity, getCodexAccountCredential, getValidCodexToken, isCodexAccountGenerationLive, readCodexAccountRecord } from "../account-store";
 import { getAccountQuota, isCodexQuotaExhausted, setAccountQuotaFromParsed, withoutRetiredCodexQuota } from "../quota";
@@ -14,11 +13,11 @@ import { codexAccountUsesRemainingQuota } from "../account-use-remaining";
 import { getCodexAccountPriority } from "../account-priority";
 import { getCodexAccountAutoSwitchThresholdOverride } from "../account-auto-switch";
 import { clearThreadAccountMapForAccount, isCodexAccountPlanExcluded, reconcileCodexActiveAfterExclusion } from "../routing";
-import { codexPlanValue, extractChatgptSubscription, isThirtyDayOnlyCodexPlan, type ChatgptSubscription } from "../plan";
+import { codexPlanValue, isThirtyDayOnlyCodexPlan } from "../plan";
 import { isAccountNeedsReauth, markAccountNeedsReauth } from "../account-runtime-state";
 import { getValidMainAccountToken, isMainAccountRefreshGrantRejected, MAIN_CODEX_ACCOUNT_ID } from "../main-account";
 import { captureConfigGeneration } from "../../lib/state-store-sweeper";
-import { captureMainAccountIdentityGeneration, captureMainQuotaWriter, getMainAccountCredentialPresence, getMainAccountInfoCache, getObservedMainQuotaIdentityKey, isMainAccountIdentityGenerationLive } from "../main-account-cache";
+import { captureMainAccountIdentityGeneration, getMainAccountCredentialPresence, getMainAccountInfoCache, getObservedMainQuotaIdentityKey, isMainAccountIdentityGenerationLive } from "../main-account-cache";
 import type { CodexQuotaRefreshOutcome } from "../quota-refresh-outcome";
 import { getMainAccountHardLockStatus } from "../main-account-hard-lock";
 import type { MainAccountHardLockStatus } from "../main-account-hard-lock";
@@ -115,7 +114,6 @@ export function poolAccountDto(
   priority: number,
   maskEmails: boolean,
   upstreamAccountKey?: string,
-  subscription?: ChatgptSubscription,
 ): CodexAuthAccountDto {
   const plan = codexPlanValue(account.plan);
   const quota = quotaForPlan(quotaResult.quota, plan);
@@ -149,7 +147,6 @@ export function poolAccountDto(
     email: projectEmail(account.email, maskEmails) ?? account.email,
     ...(account.alias !== undefined ? { alias: account.alias } : {}),
     ...(plan !== undefined ? { plan } : {}),
-    ...(subscription ? { subscription } : {}),
     logLabel: codexAccountLogLabel(account),
     isMain: false,
     paused,
@@ -185,7 +182,6 @@ export interface CodexAuthAccountDto {
   alias?: string;
   email: string;
   plan?: string | null;
-  subscription?: ChatgptSubscription;
   logLabel?: string;
   isMain: boolean;
   paused: boolean;
@@ -396,7 +392,6 @@ export async function listCodexAuthAccountsSnapshot(
       maskEmails,
       codexUpstreamAccountKey(identitySecret, verifiedAccountId,
         user.conflict ? undefined : user.userId),
-      extractChatgptSubscription(undefined, currentCredential.accessToken),
     )];
   });
   const projectSnapshot = (mainRefreshRefused = false): CodexAuthAccountsSnapshot => {
@@ -431,16 +426,6 @@ export async function listCodexAuthAccountsSnapshot(
     const mainIdentity = mainSnapshotLive && getObservedMainCodexCollisionIdentity() === observedMainIdentity
       ? observedMainIdentity : undefined;
     const mainAccountKey = codexUpstreamAccountKey(identitySecret, mainIdentity?.accountId, mainIdentity?.userId);
-    // Subscription dates come from the stored main Codex tokens; this read never requests a refresh.
-    const mainTokens = readCodexTokens();
-    const mainAccountId = getMainChatgptAccountId(mainTokens);
-    // A passive read may retain the previous login's metadata after auth.json changes.
-    // Only attach dates to a populated snapshot when its observed identity still matches.
-    const subscriptionIdentityMatches = mainInfo === EMPTY_MAIN_ACCOUNT_INFO
-      || (mainAccountId !== null && captureMainQuotaWriter(mainAccountId) !== undefined);
-    const subscription = mainTokens && subscriptionIdentityMatches
-      ? extractChatgptSubscription(mainTokens.id_token, mainTokens.access_token)
-      : undefined;
     const main: CodexAuthAccountDto = {
       id: MAIN_CODEX_ACCOUNT_ID,
       slotId: MAIN_CODEX_ACCOUNT_ID,
@@ -448,7 +433,6 @@ export async function listCodexAuthAccountsSnapshot(
       ...(mainAccountKey ? { upstreamAccountKey: mainAccountKey } : {}),
       email: projectEmail(mainInfo.email, maskEmails) ?? "Codex App login",
       plan: mainInfo.plan,
-      ...(subscription ? { subscription } : {}),
       ...(liveQuotaRefresh ? { quotaRefresh: liveQuotaRefresh } : {}),
       logLabel: "main",
       isMain: true,

@@ -79,7 +79,8 @@ export function readCodexTokens(): CodexTokens | null {
   return result.status === "ok" ? result.tokens : null;
 }
 
-export function getMainChatgptAccountId(tokens: CodexTokens | null = readCodexTokens()): string | null {
+export function getMainChatgptAccountId(): string | null {
+  const tokens = readCodexTokens();
   if (!tokens) return null;
   return extractAccountId(tokens.id_token, tokens.access_token) ?? (tokens.account_id || null);
 }
