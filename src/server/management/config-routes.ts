@@ -879,8 +879,8 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
 
   if (url.pathname === "/api/diagnostics/project-config" && req.method === "GET") {
     const { getCachedProjectConfigDiagnostics } = await import("../../codex/project-config-warnings");
-    const { warnings, grouped, status } = await getCachedProjectConfigDiagnostics();
-    return jsonResponse({ warnings, grouped, status });
+    const { warnings, grouped } = getCachedProjectConfigDiagnostics();
+    return jsonResponse({ warnings, grouped });
   }
 
   if (url.pathname === "/api/sync" && req.method === "POST") {

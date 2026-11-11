@@ -37,7 +37,6 @@ const WORKER_ENTRIES: Record<string, string> = {
   "policy-worker": join(repoRoot, "src", "storage", "policy-worker.ts"),
   "restore-worker": join(repoRoot, "src", "storage", "restore-worker.ts"),
   "history-worker": join(repoRoot, "src", "codex", "history-worker.ts"),
-  "project-config-scan-worker": join(repoRoot, "src", "codex", "project-config-scan-worker.ts"),
   "request-history-rebuild-worker": join(repoRoot, "src", "routing", "history", "rebuild-worker.ts"),
 };
 const GEN_FILE = join(repoRoot, "src", "generated", "worker-bundles.gen.ts");
