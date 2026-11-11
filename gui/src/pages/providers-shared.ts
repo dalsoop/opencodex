@@ -13,9 +13,15 @@ export interface ProvidersConfig {
     reasoningWireFormat?: "gateway-object";
     preserveResponsesReasoningContent?: boolean;
     authMode?: string;
+    googleMode?: "ai-studio" | "vertex" | "cloud-code-assist";
+    project?: string;
+    location?: string;
+    vertexCredentialKind?: "ambient" | "marker" | "reference" | "api-key";
+    anthropicOAuthInstance?: "anthropic2";
     keyOptional?: boolean;
     disabled?: boolean;
     initialModelSelection?: { status: "pending" | "ready" | "all-off"; modelCount?: number };
+    discovery?: import("../models-groups").ProviderDiscoverySummary;
     note?: string;
     codexAccountMode?: "direct" | "pool";
     xaiResponsesOptInState?: boolean | "mixed";
@@ -65,6 +71,7 @@ const OAUTH_LABELS: Record<string, string> = {
   // stored row can never reach this map under the old id.
   devin: "Devin",
   "dsh-account": "DeepSeek Account (DSH)",
+  "workbuddy-ai": "WorkBuddy AI",
 };
 
 export const oauthLabel = (id: string) => OAUTH_LABELS[id] ?? id;

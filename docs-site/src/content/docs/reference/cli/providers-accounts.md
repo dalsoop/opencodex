@@ -36,6 +36,7 @@ both `--adapter` and `--base-url`.
 | `resets` | `--limit <n>`, `--json` | List recently detected quota-window resets. |
 | `presets` | `--json` | List dashboard provider presets. |
 | `account-mode` | `pool`, `direct`, `--json` | Select pooled or direct Codex account routing. |
+| `import-cc-switch` | `--source <FILE>`, `--provider <id>`, `--apply`, `--restore`, `--allow-private-network`, `--json` | Preview, selectively apply, or restore keyless provider entries from a CC-Switch SQLite database (`cc-switch.db`) or legacy JSON file. |
 
 ```bash
 ocx provider list --json
@@ -53,6 +54,13 @@ ocx models live --provider ark --json
 `registryCount` summary from `--json`. Each object has the same fields as an item in the `configured` array.
 Use it for scripts that process one configured provider object per line.
 `--json` and `--jsonl` cannot be combined.
+
+Each configured row also has `active`. It is `false` when this device is linked to a Home
+(a Remote Link Child or a Hub-mode client): the row is local configuration that the Home's
+providers shadow, so it does not serve requests while the link is connected. It is `true` when the
+row actually serves, including when the link state cannot be read. Rows never carry credential
+values: `baseUrl` drops embedded userinfo and masks credential-shaped query values such as `key`
+or `token`, while keeping ordinary parameters such as `api-version`.
 
 :::caution[Custom headers are not a credential channel]
 `--headers` is for non-secret request metadata — routing hints, tenant or
@@ -103,7 +111,10 @@ ocx provider snapshot --json
 
 Live add uses the target's presets and refuses an observed existing provider
 without `--force`. The check and server upsert are not atomic: concurrent changes
-can race. Custom providers still need `--adapter` and `--base-url`. `--live`
+can race. Custom providers still need `--adapter` and `--base-url`; a name the
+target does not offer as a preset, given without both, exits 2 with a message
+naming it, and so does canonical `openai` when the target lacks its preset.
+Nothing is written in either case. `--live`
 never falls back to a local save; combining it with `--sync` is invalid.
 Credentials belong in the supported human login or stdin flow, not CLI examples.
 
@@ -212,6 +223,27 @@ be stdin. Each input has a 4 MiB limit and a 30-second read deadline. The combin
 serialized `{baseline,next}` request must also fit 4 MiB. Interactive stdin,
 special files, conflicting flags, invalid fields and unconfirmed removals are
 refused before mutation with exit 2. Input errors never echo the submitted values.
+
+### Keyless CC-Switch provider import
+
+```bash
+ocx provider import-cc-switch --source ~/.cc-switch/cc-switch.db
+ocx stop
+ocx provider import-cc-switch --source ~/.cc-switch/cc-switch.db --provider my-provider --apply
+# Start the proxy in another terminal (or run ocx ensure), then add credentials:
+ocx start
+printf '%s\n' "$API_KEY" | ocx account add-key my-provider
+
+# Separate rollback path (stop the proxy first; removes unedited keyless entries only):
+ocx stop
+ocx provider import-cc-switch --restore
+```
+
+`ocx provider import-cc-switch` projects values **only** from an explicit allowlist of non-secret metadata fields (provider IDs, app types, base URLs, wire dialects, and default models) from a plain regular CC-Switch SQLite database or legacy JSON file. Source and embedded-config bytes are read transiently to scan the input, while secret fields, free-text display names, and TOML comments are skipped at the byte level, never decoded into strings, written, or logged, and transient byte buffers are zeroed in `finally`. Narrow base-URL path rules (`http(s)://host[:port]` with an empty path or 1–4 lowercase `[a-z0-9._-]` API path segments such as `/v1`, `/api/v1`, or `/compatible-mode/v1`) and identifier/model syntax checks act as defense in depth and reject non-conforming values without echoing them. Source files are opened once with `O_NOFOLLOW | O_NONBLOCK` descriptor verification and deserialized read-only in memory for SQLite without temporary files; SQLite files with multiple hard links (`nlink > 1`) are refused so sidecar checks cannot be bypassed via an alias path, and if a sibling `-wal` or `-journal` file is non-empty, import refuses and asks you to close CC-Switch (or checkpoint the database) and retry. Only import from a trusted local CC-Switch source, and verify every printed ID, model, and `baseUrl` before adding credentials:
+
+- **Preview (default):** requires `--source <FILE>`, writes nothing, and reports discovered, eligible, conflicting, and invalid entries.
+- **Apply (`--apply`):** requires `--source <FILE>` and a stopped proxy (`ocx stop`), and is refused on a Remote Link Child. Repeat `--provider <id>` to import only selected entries, or pass `--allow-private-network` to permit loopback or private-network base URLs. Even without a prior preview, `--apply` prints every imported provider ID, default model, and destination URL before writing keyless provider entries and recording a rollback journal at `$OPENCODEX_HOME/cc-switch-provider-import-journal.json` (`stdout` in text mode, `stderr` in `--json` mode); a second apply is refused while an active journal exists. Verify the printed entries, start the proxy (`ocx start` in another terminal or `ocx ensure`), and add credentials with `printf '%s\n' "$API_KEY" | ocx account add-key <provider>` (piped stdin) or `ocx login <provider>`.
+- **Restore (`--restore`):** separate rollback path (not a continuation of adding credentials) that requires a stopped proxy (`ocx stop`), is refused on a Remote Link Child, and takes no `--source`, `--provider`, or `--allow-private-network`. It inspects `auth.json` read-only at the byte level (failing closed if unreadable or malformed) and removes only providers from the active journal that still match their imported keyless state and are not selected as `defaultProvider` or referenced by routing, combos, fallback policy, OAuth accounts, or API keys.
 
 ## Authentication
 
@@ -470,9 +502,10 @@ reset changes and expires after six hours or at the observed reset, whichever co
 
 An unreadable 5h reading cannot hide a weekly block. Unknown usage does not fabricate a zero, and a missing reading does
 not erase an already measured blocking tuple. A predicted reset time alone does not unlock it.
-While blocked, the minute sweep waits for the latest known blocking reset, then checks owned usage.
-If no future reset is known or a check remains blocked, recovery uses a capped 5/10/20/40/60-minute
-schedule; a longer `Retry-After` also delays profile and token preparation. Only fresh valid usage or authoritative window-absence evidence
+While blocked, recovery checks owned usage metadata on a capped 5/10/20/40/60-minute schedule, so a reset
+redeemed outside opencodex is noticed before the predicted reset; the first check waits five minutes, checks
+stay at least five minutes apart, and the next check is pulled in to the latest known blocking reset. A paused
+or reauthentication-required main receives no checks before its predicted reset. A longer `Retry-After` also delays profile and token preparation. Only fresh valid usage or authoritative window-absence evidence
 can lift the block. In Pool mode, a quota `--refresh` bypasses cache freshness but still honors failed-read pacing;
 a deferred read makes no new diagnostic attempt. Other pause, reauthentication, and upstream limits remain independent.
 
@@ -559,7 +592,7 @@ List and switch provider accounts and API-key pools through the running proxy. T
 surface is:
 
 ```text
-Usage: ocx account <list|history|current|use|clear|refresh|auto-switch|alias|priority|pause|resume|pause-exhausted|strategy|sticky|remove|clear-cooldown|add-key|import|import-orca|login|reauth|code|cancel|reset-credits|grok-reset-coupons|main> ...
+Usage: ocx account <list|history|current|use|clear|refresh|auto-switch|alias|priority|pause|resume|reset-affinity|pause-exhausted|strategy|sticky|remove|clear-cooldown|add-key|import|import-orca|login|reauth|code|cancel|reset-credits|grok-reset-coupons|main> ...
 
 list [provider]     Codex account pool, OAuth accounts and API keys (identifiers shown masked as the API returns them).
 history openai <pool-account-id> [--limit <1-200>]  Recent routing decisions for one Codex pool account.
@@ -573,6 +606,7 @@ pause <provider> <id|alias|main>  Hold an account out of automatic selection.
 resume <provider> <id|alias|main>  Return a paused account to automatic selection.
 pause-exhausted <provider>  Pause every account whose quota is spent.
 clear-cooldown <openai|anthropic> <id|alias|main>  Drop a cooldown the proxy set after an upstream failure.
+reset-affinity <anthropic|anthropic2> [--json]  Confirm all session bindings are cleared, even with no accounts; selection and pause state stay unchanged. Run on the Home; a Remote Link Child names the Home and sends no request.
 strategy <provider> [<quota|round-robin|fill-first|least-loaded|reset-first>]  Pool placement strategy; least-loaded is Kiro-only.
 sticky <provider> [<1-100>]  Requests a bound thread keeps on one account; omit the value to read it.
 priority <provider> <id|alias|main> [first|earlier|normal|later|last|-100..100|reset]  Selection order; omit the value to read it.
@@ -591,7 +625,7 @@ A selection-order change applies from the next unbound request and never moves a
 Account subcommands require the proxy to be running and auto-resolve its recorded runtime port,
 except `import-orca`: preview is local-only, and `import-orca --apply` requires the proxy to be stopped.
 Successful operations exit 0. Invalid usage, an unknown provider or account/key id, an unreachable
-proxy, or an API failure exits 1. Credential fields are displayed exactly as the management API
+proxy, or an API failure normally exits 1. For `reset-affinity`, HTTP 404 exits 4 and HTTP 409 exits 5; other API failures and unconfirmed results exit 1. Credential fields are displayed exactly as the management API
 returns them (including its masking); raw API keys and OAuth tokens are never returned. Display
 conveniences are synthesized client-side, same as the dashboard: `main` is the CLI alias for the
 Codex App login in the `openai` account pool, OAuth accounts without an email appear as `Account N`,
@@ -666,6 +700,13 @@ changes Orca files, or changes the active pool account.
 
 ### `ocx account list [provider] [--json] [--all] [--quota [--refresh]]`
 
+Stored ChatGPT pool accounts remain listable on hosts without a native Codex home, including in the
+dashboard and on account refresh. Listing does not create a Codex home or sign out the native main
+account. Disabling the Codex client integration does not disable an existing native login's quota
+observation; invalid explicit `CODEX_HOME` paths still report a configuration error. Unsafe
+`OPENCODEX_HOME` storage reports an error even when the native Codex home is missing.
+Default-home resolution also reports errors for files, dangling links, and parent directories that cannot be traversed.
+
 Without a provider, lists the Codex pool, OAuth accounts, and configured API-key pools. Empty
 providers are skipped unless `--all` is present. With a provider, lists only that credential family.
 Human output uses `PROVIDER TYPE ID PLAN/LABEL PRIORITY STATUS`; a manually chosen Codex row is marked
@@ -683,6 +724,14 @@ returns:
 { accounts: AccountRow[], notes: string[] }
 ```
 
+Codex JSON rows include `slotId` (the registered `id`) and `slotKind` (`native-main` or
+`pool`). When the proxy can verify both the upstream account and user identity, it also
+includes `upstreamAccountKey` (`uai1_` followed by 64 lowercase hexadecimal characters).
+Equal keys within the `openai` provider identify slots for the same upstream user; keep
+each slot and its quota state separately. The key is local to this installation and can
+change when its administrator token rotates. If it is absent, do not infer a match from
+masked email or quota values. Raw upstream IDs, user claims and credentials are not listed.
+
 An empty provider listing names the next command in human output and JSON `notes`:
 `ocx account login <provider>` for OAuth/Codex, or `ocx account add-key <provider>`
 with a human-controlled piped stdin source for API keys. An empty global listing
@@ -696,25 +745,6 @@ credential conflicts, and pending validation retain distinct guidance.
 Codex rows preserve the server's boolean `creditsAfterLimit` in list/current JSON;
 human rows show `paid-credits: on` only when permission is enabled. These reads do
 not change paid-credit permission.
-
-OpenAI ChatGPT rows in `--json`, with or without `--quota`, optionally include:
-
-```json
-{"provider":"openai","id":"<redacted>","subscription":{"activeStart":"2026-09-18T17:15:31+00:00","activeUntil":"2026-10-18T17:15:31+00:00","lastChecked":null}}
-```
-
-`activeStart`, `activeUntil` (the subscription end/next billing date), and `lastChecked`
-are copied unchanged from the stored token's `https://api.openai.com/auth` claims
-`chatgpt_subscription_active_start`, `chatgpt_subscription_active_until`, and
-`chatgpt_subscription_last_checked`. Missing or non-string values are `null`;
-if all three claims are absent, `subscription` is omitted. These are display-only,
-possibly stale dates: reading them does not refresh credentials. Main-account ID-token
-claims take precedence over access-token claims, matching plan-token precedence;
-pool accounts use their stored access token. Remote Link Children retain these fields
-from the Home's passive account response; older Homes without them omit the object.
-If cached main-account metadata cannot be tied to the stored token's account identity,
-its dates are omitted rather than attributed to a different login.
-Tokens and unrelated JWT claims are never included.
 
 `--quota` adds a `QUOTA` column with each account's own usage, for providers that support a
 per-account probe (Anthropic, Kiro, Google Antigravity, and Devin today). It is opt-in because the proxy probes the upstream
@@ -783,6 +813,8 @@ separately billed sends add to the request spend. Credits are never estimated fr
 With two or more Kiro accounts logged in, request-rate, confirmed monthly-quota, and
 confirmed suspension refusals can rotate before output. Monthly exhaustion excludes only
 that login until reset or evidence expiry; completed service clears an older verdict.
+Quota refusals include the exact `MONTHLY_REQUEST_COUNT` and `OVERAGE_REQUEST_LIMIT_EXCEEDED`
+reasons on HTTP 400 or 429. Plans allowing overage can keep serving after the monthly gauge reaches 100%.
 Reactive rotation remains available when proactive account preference is off. Accounts are added one at a time —
 `ocx account login kiro` hands off to the Kiro CLI and appends the new account to the pool. In the dashboard, Login and Add account also offer Builder ID, Google, and GitHub device login alongside the Kiro CLI choice; native device login adds an account without signing the CLI out.
 Users of one organization (IAM Identity Center) profile share its profile ARN, so a Kiro CLI account is identified by that profile together with the email `kiro-cli whoami` reports for the session. Two users of the same organization therefore stay separate accounts, and signing the same user in again updates that user's account. When `kiro-cli whoami` reports no user, the profile alone identifies the account as before. If that profile already has an account with a known user, such a login only refreshes the account whose stored Kiro CLI session it continues; any other login is refused instead of replacing an account, and an Add account login switches the Kiro CLI back to its previous session. Run `kiro-cli whoami` to confirm the signed-in user, then retry. Reauthenticating an account saved before its user was known records the user that signs in, unless that user already has another account of the same profile.
@@ -817,9 +849,8 @@ that state and still exits 0. `--json` returns:
 `auto` clears the manual selection so the pool places work by its own strategy again — unless a Codex account literally carries the id `auto`, which wins by exact-id precedence; `ocx account clear <provider>` always restores automatic selection. Any Codex account can be named by the alias set with `ocx account alias` instead of its id; that holds for `priority`, `pause`, `resume`, `clear-cooldown`, `remove` and `alias` too. For Codex accounts, `auto`, `main` and `__main__` are reserved regardless of case and cannot be assigned as aliases. OAuth and API-key display names keep their existing rules.
 
 Selects an existing Codex account, OAuth account, or API key. For `openai`, `main` selects the Codex
-App login. A Codex Pool selection clears process-local affinity and applies to the next request,
-including one from an existing visible task; proxy restart or affinity eviction can also leave a task
-unbound, while in-flight requests keep their captured account. This controls Pool routing only;
+App login. A Codex Pool selection clears affinity and applies to the next request,
+including one from an existing visible task. Bindings for requests with a session ID (including normal Codex CLI and App turns and subagents), or session-less requests anchored on their immediate parent, can survive a graceful proxy restart, for up to 24 hours idle, when the final affinity save at shutdown succeeds. Deeper session-less chains and bindings to the Codex App main login stay in memory only and are assigned again after restart; eviction, account removal, re-login, a crash, or an affinity reset can leave a task unbound, while in-flight requests keep their captured account. This controls Pool routing only;
 Direct mode keeps using the caller-owned/native main credential. Usage-based proactive switching,
 401/403 reauthentication, 429/retry-after cooldowns, exclusion, and pre-output 429/402 failure
 recovery may later select another eligible Pool account. Those recovery paths remain active when
@@ -882,7 +913,24 @@ refresh remain available even when its original credential source was not record
 ```bash
 ocx account pause google-antigravity <account-id-or-alias>
 ocx account resume google-antigravity <account-id-or-alias>
+ocx account resume anthropic <account-id-or-alias> --if-healthy
 ```
+
+#### Resume if healthy
+
+An unattended supervisor can run `ocx account resume <provider> <account-id-or-alias> --if-healthy`.
+It resumes the account only after a fresh read of that account's own usage succeeds: the WHAM quota
+read for a Codex pool account, or the usage read with the stored token for an Anthropic OAuth
+account. A pause that [auto-pause](/reference/configuration/providers/#auto-pause-permanently-refused-accounts)
+recorded as `oauth_organization_disabled` or `account_permission_denied` is never resumed this way.
+An Anthropic token that has expired is not refreshed for the check: the command reports
+`credential_expired`, and a new login is the way back. Other OAuth providers and the main Codex
+account report `health_check_unsupported`; API-key pools reject the flag. A refused resume exits with
+code 3 and prints the reason, or `{ "ok": false, "resumed": false, "reason": ... }` with `--json`.
+
+An explicit login or reauthentication of a paused OAuth or Codex pool account clears a pause that
+auto-pause recorded, because that evidence described the credential the login replaced. A pause set by
+hand stays until `ocx account resume`.
 
 ### `ocx account clear-cooldown <openai|anthropic> <id|alias|main> [--json]`
 
@@ -1173,12 +1221,20 @@ moved because its encrypted AAD and operating-system keyring identity are intent
 
 ### `ocx models [subcommand]` · `ocx model <subcommand>`
 
-`ocx model` is an alias of `ocx models`. With no subcommand, list the models statically seeded in
-configured providers. `--provider` filters one configured provider and `--json` returns model
+`ocx model` is an alias of `ocx models`. With no subcommand, list saved and router-known model IDs
+for configured providers, including registry seeds, custom models and this process's discovery
+cache. A fresh CLI process may have an empty cache; this is not the running proxy catalog. Legacy
+key presets may retain registry seeds when their configured destination changes. `--provider` filters one configured provider and `--json` returns model
 metadata. `live` reads the running catalog; `add`, `edit`, `remove`, and `list-custom` manage manual
 catalog entries; `enable`, `disable`, and `provider` control visibility; `selected` controls a
 provider allowlist; `context` controls provider context caps; and `shadow` manages background
 shadow-call interception.
+
+The `reasoningEfforts` ladder appears only with `--json`. A `null` value means the ladder is
+unknown or was not looked up, including when credential-scoped learned refusals would require
+opening the OS keychain. An empty array `[]` means an explicitly empty ladder or that reasoning
+effort is disabled for the model, such as by `noReasoningModels`. Use `ocx models live` to inspect
+the running proxy's catalog.
 
 Model prices are estimates in USD per million tokens. `ocx models --json` includes a
 `price` object with `cost4` rates and their source; `ocx models price --json` keeps
@@ -1204,7 +1260,7 @@ from custom-model `edit`.
 
 | Subcommand | Supported flags | Action |
 | --- | --- | --- |
-| `list` (default) | `--provider <name>`, `--json` | List models seeded in configured providers, with estimated input/output prices. |
+| `list` (default) | `--provider <name>`, `--json` | List local saved and router-known models, with estimated input/output prices. |
 | `live` | `--provider <name>`, `--json` | Read the running catalog, including models discovered at runtime. Rows are flagged `native`/`routed`, `custom`, and `enabled`/`disabled`. |
 | `price <provider/model>` | `--json` | Read the saved manual override and effective price, including automatic catalog defaults. |
 | `set-price <provider/model>` | `--input <rate>`, `--output <rate>`, `--cache-read <rate>`, `--cache-write <rate>`, `--auto`, `--json` | Set display prices in USD per 1M tokens. Input/output are required when setting; omitted cache rates become zero. `--auto` removes only this model's override. |

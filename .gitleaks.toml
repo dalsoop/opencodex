@@ -1,0 +1,41 @@
+# gitleaks configuration for dalsoop/opencodex (read by .github/workflows/secret-detection.yml and the
+# Macs' pre-commit secret check). The default rules stay on; nothing here disables a rule.
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = """
+Upstream lidge-jun/opencodex test fixtures (brought in with the v2.100.2 merge). Each listed file holds a made-up
+provider key, token or canary that the upstream tests feed through redaction, error-body and request-log paths to
+prove the value never reaches output. Reviewed 2026-11-12 (ocx-align T8): every hit is a test constant, not a
+credential. Scoped to the generic-api-key rule and to exactly these files; every other rule still applies to them.
+"""
+targetRules = ["generic-api-key"]
+paths = [
+  '''^gui/tests/logs-failure-detail\.test\.ts$''',
+  '''^native/ocx-child/tests/relay_and_lifecycle\.rs$''',
+  '''^tests/fixtures/link/ocx-child-conformance\.json$''',
+  '''^tests/helpers/messages-proxy-refusal-case\.ts$''',
+  '''^tests/lib/client-error-body\.test\.ts$''',
+  '''^tests/lib/upstream-condition\.test\.ts$''',
+  '''^tests/providers/cc-switch-import\.test\.ts$''',
+  '''^tests/providers/command-code-plan-denial\.test\.ts$''',
+  '''^tests/responses/chat-error-body-normalization\.test\.ts$''',
+  '''^tests/responses/chat-error-collector-verdicts\.test\.ts$''',
+  '''^tests/responses/passthrough-headers\.test\.ts$''',
+  '''^tests/server/fallback-routes\.test\.ts$''',
+  '''^tests/server/local-control-socket\.test\.ts$''',
+  '''^tests/server/response-model-identity\.test\.ts$''',
+  '''^tests/server/safe-response-headers\.test\.ts$''',
+  '''^tests/server/server-chat-error-body-evidence\.test\.ts$''',
+  '''^tests/server/server-kiro-usage-log-e2e\.test\.ts$''',
+  '''^tests/server/server-live-cancel\.test\.ts$''',
+  '''^tests/server/server-native-final-log\.test\.ts$''',
+  '''^tests/server/server-ollama-inbound-errors\.test\.ts$''',
+  '''^tests/server/turn-state-handles\.test\.ts$''',
+  '''^tests/server/upstream-error-detail-boundaries\.test\.ts$''',
+  '''^tests/usage/mistral-budget-reset-identity\.test\.ts$''',
+  '''^tests/usage/provider-failure-detail\.test\.ts$''',
+  '''^tests/usage/request-log-error-detail\.test\.ts$''',
+  '''^tests/usage/request-log-identity-bounds\.test\.ts$''',
+]

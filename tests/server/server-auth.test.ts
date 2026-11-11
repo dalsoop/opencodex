@@ -909,7 +909,10 @@ describe("server local API auth", () => {
       const health = await fetch(`http://127.0.0.1:${server.port}/healthz`);
       expect(health.status).toBe(200);
       const healthBody = await health.json() as Record<string, unknown>;
-      expect(Object.keys(healthBody).sort()).toEqual([
+      // OCX-2: the opaque Home instance id is the one identity field, present once the install
+      // identity exists and always in its fixed random shape.
+      if ("instanceId" in healthBody) expect(healthBody.instanceId).toMatch(/^home_[0-9a-f]{32}$/);
+      expect(Object.keys(healthBody).filter(key => key !== "instanceId").sort()).toEqual([
         "asideSyncCapability",
         "guiPairCapability",
         "pid",
@@ -3892,9 +3895,10 @@ describe("server local API auth", () => {
         errorCode: "cyber_policy",
         terminalStatus: "failed",
         closeReason: "terminal",
-        upstreamError: message,
+        upstreamCondition: "request_rejected",
         attempts: [expect.objectContaining({ status: 400, errorCode: "cyber_policy" })],
       });
+      expect(JSON.stringify(logs.at(-1))).not.toContain(message);
     } finally {
       await server.stop(true);
       await upstream.stop(true);

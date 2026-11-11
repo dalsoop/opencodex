@@ -6,7 +6,7 @@ import { canonicalDirectory } from "./desktop-remote-store-io";
 import {
   resolveDesktop3pConfigLibraryPath, parseMetadata, SAFE_DESKTOP_PROFILE_ID, isRecord,
   isOwnedDesktopEntry, isOwnedDesktopGatewayEntry, profilePath, readDesktopProfileSnapshot, readDesktopLibraryText, readDesktopLibraryBytes,
-  readOptionalDesktopLibraryBytes,
+  readOptionalDesktopLibraryBytes, assertDesktopLibraryTextSize, serializeDesktopLibraryJson,
   type Desktop3pConfigLibraryOptions, type Desktop3pMetadata, type Desktop3pMetadataEntry,
 } from "./desktop-3p-library";
 export { resolveDesktop3pConfigLibraryPath, type Desktop3pConfigLibraryOptions } from "./desktop-3p-library";
@@ -27,6 +27,7 @@ import {
 import { nativeOpenAiContextWindow, type NativeContextLimitsInput } from "../codex/catalog";
 import { localAdmissionToken, localInferenceDestination } from "../lib/local-destinations";
 import { assertDesktop3pModelsValid } from "./desktop-3p-guard";
+import { filterDesktopModelsByVisibility, readDesktopModelVisibility, type DesktopModelVisibility } from "./desktop-model-visibility";
 import { claudeSurfaceSupportsOneMillion, ONE_MILLION } from "./long-context";
 
 export interface Desktop3pModelEntry {
@@ -170,9 +171,11 @@ function collectDesktop3pModels(
   routedModels: Array<Desktop3pRoutedModel>,
   profile?: OcxClaudeDesktopProfile,
   nativeContextCap?: NativeContextLimitsInput,
-): { models: Desktop3pModelEntry[]; registry: Map<string, string>; realAnthropicIds: Set<string> } {
+): { models: Desktop3pModelEntry[]; routes: string[]; registry: Map<string, string>; realAnthropicIds: Set<string> } {
   const registry = new Map<string, string>();
   const models: Desktop3pModelEntry[] = [];
+  // routes[i] is the route models[i] serves; visibility filters by route, never by alias.
+  const routes: string[] = [];
   const candidates: Desktop3pRoutedModel[] = [
     // Native candidates carry their real context window from the same accessor the
     // Desktop DTO uses, so a native 1M/372k model resolves identically in the written
@@ -224,6 +227,7 @@ function collectDesktop3pModels(
         ...(model.isFamilyDefault ? { isFamilyDefault: true } : {}),
         ...(model.supports1m ? { supports1m: true, prefer1m: true } : {}),
       });
+      routes.push(model.route);
     }
     // Previous profile IDs and both hash generations are compatibility-only and can
     // collide. Bind them in stable route order so changing a family default or
@@ -248,7 +252,7 @@ function collectDesktop3pModels(
       }
     }
     desktop3pAliasesByRoute = aliasesByRoute;
-    return { models, registry, realAnthropicIds };
+    return { models, routes, registry, realAnthropicIds };
   }
 
   const aliasesByRoute = new Map<string, string>();
@@ -272,6 +276,7 @@ function collectDesktop3pModels(
         ...(supports1m.supports1m ? { prefer1m: true as const } : {}),
       });
       emittedNames.add(alias);
+      routes.push(route);
       aliasesByRoute.set(route, alias);
       continue;
     }
@@ -300,12 +305,13 @@ function collectDesktop3pModels(
       ...supports1m,
       ...(supports1m.supports1m ? { prefer1m: true as const } : {}),
     });
+    routes.push(route);
     aliasesByRoute.set(route, alias);
   }
 
   if (models[0]) models[0].isFamilyDefault = true;
   desktop3pAliasesByRoute = aliasesByRoute;
-  return { models, registry, realAnthropicIds };
+  return { models, routes, registry, realAnthropicIds };
 }
 
 /** Build and install the registry used to decode Desktop aliases. */
@@ -328,6 +334,11 @@ export interface Desktop3pModelOptions {
    * (`supports1m`) but no longer defaults to it (`prefer1m` dropped).
    */
   preferOneMillion?: boolean;
+  /**
+   * Rows Desktop lists (#7702). Filters only the emitted list: the decode registry keeps every
+   * route so a running session holding a just-hidden alias still routes.
+   */
+  visibility?: DesktopModelVisibility;
 }
 
 export function generateDesktop3pModels(
@@ -337,15 +348,25 @@ export function generateDesktop3pModels(
   nativeContextCap?: NativeContextLimitsInput,
   options: Desktop3pModelOptions = {},
 ): Desktop3pModelEntry[] {
-  const { models, registry, realAnthropicIds } = collectDesktop3pModels(nativeSlugs, routedModels, profile, nativeContextCap);
+  const { models: all, routes, registry, realAnthropicIds } = collectDesktop3pModels(nativeSlugs, routedModels, profile, nativeContextCap);
   desktop3pRegistry = registry;
   desktop3pRealAnthropicIds = realAnthropicIds;
+  let models = filterDesktopModelsByVisibility(all, routes, options.visibility);
+  if (models.length === 0 && all.length > 0) {
+    // An empty static list leaves Desktop with no usable picker. The dashboard refuses to save
+    // such a selection; this covers selections whose every model has since disappeared.
+    console.warn("[opencodex] Claude Desktop model visibility hides every available model; listing all models instead");
+    models = all;
+  }
   return options.preferOneMillion === false ? models.map(({ prefer1m: _prefer1m, ...model }) => model) : models;
 }
 
 /** The Desktop model options a config asks for (one place, so writer and export agree). */
-export function desktop3pModelOptions(claudeCode: { contextAccounting?: string } | undefined): Desktop3pModelOptions {
-  return { preferOneMillion: claudeCode?.contextAccounting !== "200k" };
+export function desktop3pModelOptions(
+  claudeCode: { contextAccounting?: string; desktopModelVisibility?: unknown } | undefined,
+): Desktop3pModelOptions {
+  const visibility = readDesktopModelVisibility(claudeCode);
+  return { preferOneMillion: claudeCode?.contextAccounting !== "200k", ...(visibility ? { visibility } : {}) };
 }
 
 /** Resolve an alias using the most recently generated Desktop model registry. */
@@ -642,13 +663,24 @@ function removeDesktop3pStandardPivotLocal(
     if (targetIds.length === 0) return { ok: true, changed: false, kind: "noop", libraryPath: inspected.libraryPath };
 
     let metadataAfterPivot = metadata;
+    let standardPath: string | undefined;
+    let pivotMetadataJson: string | undefined;
     if (selectedOwnedGatewayActive) {
       const standardId = randomUUID();
-      const standardPath = profilePath(inspected.libraryPath, standardId);
-      atomicWriteFile(standardPath, "{}\n");
+      standardPath = profilePath(inspected.libraryPath, standardId);
       const standardEntry: Desktop3pMetadataEntry = { id: standardId, name: "opencodex-standard" };
       metadataAfterPivot = { ...metadata, appliedId: standardId, entries: [...metadata.entries, standardEntry] };
-      atomicWriteFile(metadataPath, JSON.stringify(metadataAfterPivot, null, 2) + "\n");
+      pivotMetadataJson = serializeDesktopLibraryJson(metadataAfterPivot);
+    }
+    // Bound the final metadata before any unlink so a size refusal cannot strand
+    // a row pointing at an already-deleted profile.
+    const removalMetadataJson = serializeDesktopLibraryJson({
+      ...metadataAfterPivot,
+      entries: metadataAfterPivot.entries.filter(entry => !targetIds.includes(entry.id)),
+    });
+    if (standardPath !== undefined && pivotMetadataJson !== undefined) {
+      atomicWriteFile(standardPath, "{}\n");
+      atomicWriteFile(metadataPath, pivotMetadataJson);
     }
 
     const residualPaths: string[] = [];
@@ -674,10 +706,7 @@ function removeDesktop3pStandardPivotLocal(
     }
     // Do not leave a metadata row pointing at a deleted profile. For a foreign
     // selection this only removes proven opencodex residues; appliedId is kept.
-    atomicWriteFile(
-      metadataPath,
-      JSON.stringify({ ...metadataAfterPivot, entries: metadataAfterPivot.entries.filter(entry => !targetIds.includes(entry.id)) }, null, 2) + "\n",
-    );
+    atomicWriteFile(metadataPath, removalMetadataJson);
     return { ok: true, changed: true, kind: "removed", libraryPath: inspected.libraryPath };
   } catch (error) {
     return { ok: false, changed: false, kind: "write_failed", libraryPath: inspected.libraryPath, reason: desktopMutationFailureReason(error) };
@@ -831,7 +860,7 @@ function writeDesktop3pConfigWithGenerator(
 
     const generated = generate();
     const previous = readDesktopProfileSnapshot(configPath);
-    const configJson = JSON.stringify({ ...previous.foreign, ...generated }, null, 2) + "\n";
+    const configJson = serializeDesktopLibraryJson({ ...previous.foreign, ...generated });
     const fingerprint = createHash("sha256").update(configJson).digest("hex").slice(0, 16);
     if (refreshOnly) {
       atomicWriteFileNoFollow(configPath, configJson, undefined, {
@@ -849,9 +878,10 @@ function writeDesktop3pConfigWithGenerator(
       });
       return { written: true, path: configPath, fingerprint };
     }
+    const metadataJson = serializeDesktopLibraryJson({ ...metadata, appliedId: id, entries });
     atomicReplaceDesktopConfig(configPath, configJson, previous.bytes);
     try {
-      atomicWriteFile(metadataPath, JSON.stringify({ ...metadata, appliedId: id, entries }, null, 2) + "\n");
+      atomicWriteFile(metadataPath, metadataJson);
     } catch (metaError) {
       // Roll back from the verified bytes in memory: reopening the backup could meet a swapped
       // entry and leave the new profile beside the old metadata. A profile this call created is
@@ -895,6 +925,7 @@ export function atomicReplaceDesktopConfig(
   previous: Buffer | undefined,
   writer: typeof atomicWriteFileNoFollow = atomicWriteFileNoFollow,
 ): { backupPath?: string } {
+  assertDesktopLibraryTextSize(content);
   const validateBeforeRename = () => assertDesktopProfileUnchanged(path, previous);
   validateBeforeRename();
   const backupPath = `${path}.bak`;

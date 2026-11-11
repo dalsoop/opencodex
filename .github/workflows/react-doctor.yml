@@ -14,11 +14,15 @@ name: React Doctor
 
 on:
   # Scans the PR's changed files relative to the merge base of the target branch.
+  # The scan reads only gui/ (`directory: gui` below), so a pull request that
+  # changes nothing there has nothing to scan: it used to start a full-history
+  # checkout and an npm install on every PR for an empty changed-file list. No
+  # branch rule requires this check, so a PR it skips is not left waiting on it.
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
-  # Scans `main` on every push to track the health-score trend.
-  push:
-    branches: ["main"]
+    paths:
+      - "gui/**"
+      - ".github/workflows/react-doctor.yml"
 
 permissions:
   contents: read
@@ -27,8 +31,8 @@ permissions:
   # and the CLI exits 1 on ENOENT even for fork PRs.
   pull-requests: read
 
-# Cancels any in-flight scan for the same PR (or branch, on push) the moment a
-# new commit arrives, so only the latest run remains.
+# Cancels any in-flight scan for the same PR the moment a new commit arrives,
+# so only the latest run remains.
 concurrency:
   group: react-doctor-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true

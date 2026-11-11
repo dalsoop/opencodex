@@ -10,10 +10,11 @@
  *
  * It does still depend on WHERE the run starts. Bun resolves bunfig.toml from the current
  * working directory, so a run launched outside the repository never loads this file: no
- * sandbox, no arming, and getConfigDir() resolves the real ~/.opencodex. On 2026-09-15 a
- * run of that shape deleted a live home. Nothing here can close that hole from inside, so
- * a test that needs a config directory pins its own OPENCODEX_HOME rather than inheriting
- * one, and tests/ci-workflows/test-home-guard.test.ts enforces it for destructive calls.
+ * sandbox, and getConfigDir() resolves the real ~/.opencodex. On 2026-09-15 a run of that
+ * shape deleted a live home. The write guard covers that run by arming from its test-file
+ * entry (#7407), which turns such writes into refusals, but nothing here can sandbox it, so a
+ * test that needs a config directory pins its own OPENCODEX_HOME rather than inheriting one,
+ * and tests/ci-workflows/test-home-guard.test.ts enforces it for destructive calls.
  * (devlog `_plan/260730_codex_rs_upstream_v2_live_handoff/070`.)
  *
  * Import order below is load-bearing: importing the guard captures the real home at
@@ -75,6 +76,7 @@ process.env.OCX_TEST_HOME_GUARD = "1";
 // Lets a test assert one preload per process rather than assuming Bun's scheduling.
 process.env.OCX_TEST_PRELOAD_PID = String(process.pid);
 process.env.OCX_DISABLE_UPDATE_CHECK = "1";
+process.env.OCX_TELEMETRY = "0";
 process.env.OPENCODEX_KIRO_MODEL_DISCOVERY = "0";
 
 if (!isTestHomeGuardArmed() || !protectedHomeForTests()) {

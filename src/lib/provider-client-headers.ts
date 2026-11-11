@@ -21,10 +21,14 @@ const BLOCKED_FORWARDED_CLIENT_HEADERS = new Set([
   "api-key",
   "x-goog-api-key",
   "x-oai-attestation",
+  "x-openai-agent-assertion",
 ]);
 
 const ALLOWED_FORWARDED_CLIENT_HEADERS = new Set([
   "originator", "x-client-request-id", "x-codex-app-version", "user-agent",
+  // Preserve caller-supplied identifiers only when the provider explicitly opts in.
+  // Do not admit arbitrary x-codex-* fields or authentication evidence.
+  "x-codex-window-id", "x-codex-installation-id",
 ]);
 const MAX_FORWARDED_CLIENT_HEADERS = 64;
 

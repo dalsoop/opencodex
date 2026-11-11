@@ -36,6 +36,29 @@ const scriptOf = (job: Job): string => (job.steps ?? []).map(step => step.run ??
 const ACTION_PATH = ".github/actions/setup-project-bun/action.yml";
 const HELPER_PATH = "native/remote-workspace-helper/src/main.rs";
 
+describe("Docker build and runtime input scope", () => {
+  test("selects runtime sources and every GUI build input", () => {
+    for (const path of [
+      "src/config.ts", "src/config/paths.ts", "src/server/index.ts", "src/service.ts",
+      "gui/src/App.tsx", "gui/src/style.css", "gui/public/icon.svg", "gui/index.html",
+      "gui/vite.config.ts", "gui/tsconfig.json", "gui/tsconfig.app.json", "gui/tsconfig.node.json",
+      "gui/package.json", "gui/bun.lock",
+    ]) {
+      expect(`${path}:ci=${matches(filters.ci, path)}`).toBe(`${path}:ci=true`);
+      expect(`${path}:docker=${matches(filters.docker, path)}`).toBe(`${path}:docker=true`);
+    }
+  });
+
+  test("does not select Docker for tests or documentation alone", () => {
+    for (const path of [
+      "tests/server/server-live.test.ts", "gui/tests/claude-code-save.test.ts",
+      "gui/README.md", "docs-site/src/content/docs/index.mdx", "structure/runtime.md",
+    ]) {
+      expect(`${path}:docker=${matches(filters.docker, path)}`).toBe(`${path}:docker=false`);
+    }
+  });
+});
+
 describe("an edit to the setup action alone", () => {
   test("selects a job that runs the action and checks what it installed", () => {
     const selected = jobsSelectedBy(filtersMatching(ACTION_PATH))
@@ -65,10 +88,10 @@ describe("an edit to the setup action alone", () => {
   });
 });
 
-// #6713: user runtimes and compiled artifacts need 1.4.2; isolate runners need the testRunnerBun pin (1.4.3, #4956).
+// Keep runtime and test-runner role selection distinct even when package.json pins both to 1.4.4.
 // Check the active setup at each test command, so a later role switch cannot evade the guard.
 const runsBunTests = (step: Step): boolean =>
-  /\bbun\s+test\b|\bbun\s+run\s+test(?::changed)?(?:\s|$)|\bbun\s+(?:run\s+)?scripts\/test\.ts\b|scripts\/ci\/run-bun-test-batches\.sh/.test(
+  /\bbun\s+test\b|\bbun\s+run\s+test(?::changed)?(?:\s|$)|\bbun\s+(?:run\s+)?scripts\/test\.ts\b|scripts\/ci\/run-(?:bun|changed)-tests?(?:-batches)?\.sh/.test(
     (step.run ?? "").split("\n").filter(line => !line.trimStart().startsWith("#")).join("\n"),
   );
 const workflowJobs = new Map(readdirSync(repoPath(".github", "workflows"))
@@ -123,16 +146,24 @@ describe("CI Bun roles", () => {
   test("release, packaged runtime and sidecar jobs use the default runtime action", () => {
     const runtimeJobs: Record<string, string[]> = {
       "ci.yml": ["desktop-shell", "widget", "docker-smoke", "keyring-smoke"],
-      "release.yml": ["preflight", "package-standalone", "package-desktop", "verify-release", "publish", "attach-release"],
+      "release.yml": ["preflight", "package-standalone", "package-desktop", "package-npm", "verify-release", "attach-release"],
       "service-lifecycle.yml": ["linux-systemd", "macos-launchd", "windows-schtasks"],
       "desktop-installed-gate.yml": ["macos", "windows", "linux"],
     };
     for (const [file, names] of Object.entries(runtimeJobs)) {
       for (const name of names) {
-        const setups = workflowJobs.get(file)?.[name]?.steps?.filter(step => step.uses === "./.github/actions/setup-project-bun") ?? [];
+        const action = file === "service-lifecycle.yml" ? "./.evidence-policy/.github/actions/setup-project-bun"
+          : file === "release.yml" && ["package-standalone", "package-desktop", "package-npm"].includes(name)
+            ? "./trusted-release-policy/.github/actions/setup-project-bun" : "./.github/actions/setup-project-bun";
+        const setups = workflowJobs.get(file)?.[name]?.steps?.filter(step => step.uses === action) ?? [];
         expect(`${file}/${name}:${setups.length}`).toBe(`${file}/${name}:1`);
         expect(setups[0]?.with?.role).toBeUndefined();
       }
+    }
+    for (const name of ["verify-npm", "publish"]) {
+      const steps = workflowJobs.get("release.yml")?.[name]?.steps ?? [];
+      expect(steps.some(step => step.uses === "oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6")).toBeTrue();
+      expect(steps.some(step => step.run?.includes('require("./package.json").dependencies.bun'))).toBeTrue();
     }
   });
 });
@@ -227,8 +258,8 @@ describe("the narrow checks stay narrow", () => {
     const narrow = (changes?.steps ?? []).find(step => step.id === "narrow");
     expect(changes?.outputs?.setup_action).toBe("${{ steps.narrow.outputs.setup_action }}");
     expect(changes?.outputs?.remote_helper).toBe("${{ steps.narrow.outputs.remote_helper }}");
-    expect(narrow?.env?.SETUP_ACTION).toBe("${{ github.event_name == 'schedule' && 'true' || steps.filter.outputs.setup_action }}");
-    expect(narrow?.env?.REMOTE_HELPER).toBe("${{ github.event_name == 'schedule' && 'true' || steps.filter.outputs.remote_helper }}");
+    expect(narrow?.env?.SETUP_ACTION).toBe("${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' && (github.event.inputs.lane == '' || github.event.inputs.lane == 'all')) && 'true' || steps.filter.outputs.setup_action }}");
+    expect(narrow?.env?.REMOTE_HELPER).toBe("${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' && (github.event.inputs.lane == '' || github.event.inputs.lane == 'all')) && 'true' || steps.filter.outputs.remote_helper }}");
     expect(narrow?.run).toContain("exit 1");
   });
 });

@@ -18,6 +18,11 @@ closed. Explicit `xai` requires a usable stored Grok OAuth account and does not 
 requires both ChatGPT login auth and an enabled `forward` provider.
 :::
 
+On file load, a retired OpenCode Free model target in global or `claudeCode` overrides of
+`visionSidecar` or `webSearchSidecar` is removed and that sidecar is explicitly disabled, retaining
+its other settings. Select a supported target before re-enabling it. Healthy targets and the defaults
+for absent sidecar sections are unchanged.
+
 ### Additional web-search backends (explicit-only)
 
 Three more web-search backends exist beyond the ChatGPT and Claude paths. Each is
@@ -31,6 +36,12 @@ a missing credential produces no sidecar plan and the request takes the normal r
 | `exa` | Exa Search API (non-LLM result digest) | `webSearchSidecar.exaApiKey` | The key is write-only through the management API (never echoed, redacted from logs). No sidecar model applies. |
 
 ## Web-search sidecar
+
+Anthropic search-model calls and their connection-reset retries also consume the logical request's
+shared model-send and token allowances on routed Responses, including RunTurn adapters and the
+passthrough search bridge. `maxSearchesPerTurn` does not grant extra model sends. If admission is
+exhausted, that search returns an error result without contacting Anthropic. Helper admission does
+not spend the routed model's final-recovery reserve. Standalone `/v1/alpha/search` keeps its existing behavior.
 
 When Codex requests hosted `web_search` for a non-passthrough routed model, opencodex:
 
@@ -137,6 +148,19 @@ stall is not a total generation timeout. Failures before SSE starts return non-2
 failures after response headers have started are delivered as `response.failed` SSE.
 
 ## Vision sidecar
+
+Mistral's `zai-glm-5-3` is enrolled by the provider preset as text-only. With the
+vision sidecar enabled and available, OpenCodex describes attached images and
+sends their text descriptions to GLM. The Codex catalog advertises image
+attachments for this route. After an update, run `ocx sync`, then fully quit and
+relaunch the Codex desktop app or reload the VS Code window. Sync without a
+restart flag does not restart an existing Codex app-server, which can retain
+the old model list. Alternatively, use `ocx sync --restart-codex` to sync and
+restart matching Codex processes and the desktop app. Finish active work first:
+this restart ends live conversations. See the [sync and restart reference](/reference/cli/lifecycle/#ocx-sync---restart-codex---restart-app-server-only).
+After relaunch, select `mistral/zai-glm-5-3` and verify that image attachments
+are available. No model modality override is needed. Mistral documents native input in its
+[GLM 5.3 reference](https://docs.mistral.ai/models/zai-glm-5-3).
 
 Image routing is capability-aware. Before an image-bearing upstream send, opencodex resolves the selected model's effective input modalities from runtime provider evidence, explicit operator declarations, backend/registry metadata, and generated vendor metadata. A target positively known to be text-only goes through the Vision Sidecar first; the image is described **before** the main call and replaced inline with text. A target positively known to support images receives the image directly. Unknown custom models keep the existing compatibility behavior rather than being guessed text-only.
 
@@ -265,3 +289,15 @@ Claude Code OAuth fingerprint precedent, but should be soak-tested with the
 intended account and workload.
 
 See the [Configuration reference](/reference/configuration/server/#sidecars) for every field.
+
+Search responses with malformed optional fields retain valid answer text and citations. Invalid error-message values use a generic failure message. A repeated full-text completion for the same output part replaces its previous snapshot instead of duplicating the answer; distinct output parts remain separate.
+
+A completion that omits a content index cannot merge parts with different known content indexes. If a final message has malformed or missing content, its unique item ID still preserves its output position when recovering streamed text. Conflicting positions and duplicate final item IDs do not provide that ordering evidence.
+
+The OpenAI search and vision sidecars accept CR, LF and CRLF line endings, including mixed endings and CRLF split across network chunks. They read a final completion or failure event even when the server closes the body without a trailing newline. The first terminal event or `[DONE]` ends collection; later frames are ignored even when they share its network chunk. An unfinished response or one stopped by a size limit still reports an error.
+
+When a search answer ends with a Sources list, an unmatched list item stays in the answer instead of being removed as a citation. A title followed by its URL is still consumed as one citation. Non-HTTP URI-like text inside inline code, such as `mode:fast`, stays in the answer; code-formatted HTTP(S) URLs are still citations.
+
+Final response citations supply the title for a URL already seen during streaming. When the final response cites the same URL more than once, the first valid title among those citations is used. If no final title is valid, a valid streamed title is retained. Streaming-only sources are kept within the existing source-count, URL, title and byte limits.
+
+Long search queries and answers are shortened without splitting a UTF-16 surrogate pair, so a single character such as 😀 is never cut in half by the result limits. A sequence of several characters, such as emoji joined with a zero-width joiner, can still be cut between its parts.

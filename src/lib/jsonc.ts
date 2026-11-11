@@ -18,7 +18,7 @@ function stripJsonComments(text: string): string {
     const ch = text[i]!;
     const next = text[i + 1];
     if (inLine) {
-      if (ch === "\n") {
+      if (ch === "\n" || ch === "\r") {
         inLine = false;
         out += ch;
       }
@@ -82,7 +82,12 @@ function stripTrailingCommas(text: string): string {
     if (ch === ",") {
       let j = i + 1;
       while (j < text.length && /\s/.test(text[j]!)) j++;
-      if (text[j] === "}" || text[j] === "]") continue;
+      if (text[j] === "}" || text[j] === "]") {
+        let previous = i - 1;
+        while (previous >= 0 && /\s/.test(text[previous]!)) previous--;
+        // A comma without a preceding member is malformed, not a trailing comma.
+        if (text[previous] !== "[" && text[previous] !== "{") continue;
+      }
     }
     out += ch;
   }
@@ -94,11 +99,13 @@ function stripTrailingCommas(text: string): string {
  * stripped unconditionally: never probed with a strict `JSON.parse` first,
  * because materializing a deeply nested document before the rewrite guard's
  * depth ceiling would bypass that guard's resource contract. The passes are
- * identity on valid strict JSON — `//`, `/*`, and a comma before `}` or `]`
+ * identity on valid strict JSON. One leading byte-order mark is removed first;
+ * `//`, `/*`, and a comma before `}` or `]`
  * can only appear inside strings there, which the strippers never touch.
  */
 export function canonicalizeJsonc(text: string): string {
-  return stripTrailingCommas(stripJsonComments(text));
+  const source = text.startsWith("\uFEFF") ? text.slice(1) : text;
+  return stripTrailingCommas(stripJsonComments(source));
 }
 
 /**

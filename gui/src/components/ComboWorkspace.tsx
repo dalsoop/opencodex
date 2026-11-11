@@ -53,7 +53,7 @@ export default function ComboWorkspace({
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [pendingSelect, setPendingSelect] = useState<string | null | undefined>(undefined);
   const [removeId, setRemoveId] = useState<string | null>(null);
-  const [localBaseline, setLocalBaseline] = useState<ComboItem | null>(null);
+  const [localBaseline, setLocalBaseline] = useState<{ source: ComboItem; item: ComboItem } | null>(null);
   const firstComboDraft = useMemo(() => emptyDraft(), []);
   const jevAutoExists = useMemo(
     () => combos.some(combo => combo.id === "jev-auto" || combo.alias === "jev-auto"),
@@ -83,7 +83,7 @@ export default function ComboWorkspace({
   );
   const activeId = selectedId && combos.some((c) => c.id === selectedId) ? selectedId : null;
   const selected = combos.find((c) => c.id === activeId) ?? null;
-  const baseline = selected && localBaseline?.id === selected.id ? localBaseline : selected;
+  const baseline = selected && localBaseline?.source === selected ? localBaseline.item : selected;
 
   const [detailDirty, setDetailDirty] = useState(false);
 
@@ -130,14 +130,14 @@ export default function ComboWorkspace({
   };
 
   return (
-    <div className="combos-workspace-root">
+    <div className={`combos-workspace-root${creatingFirstCombo ? " combos-workspace-root--empty" : ""}`}>
       <aside className="combos-workspace-rail" aria-label={t("cws.railAria")}>
         <div className="combos-workspace-rail-header">
-          <div>
+          <div className="combos-workspace-rail-heading">
             <div className="combos-workspace-rail-title">{t("nav.combos")}</div>
             <div className="combos-workspace-rail-count">{combos.length}</div>
           </div>
-          <button type="button" className="btn btn-primary btn-sm" onClick={handleAdd} aria-label={t("cws.add")}>
+          <button type="button" className={`btn ${creatingFirstCombo ? "btn-ghost" : "btn-primary"} btn-sm`} onClick={handleAdd} aria-label={t("cws.add")}>
             <IconPlus width={14} height={14} /> {t("cws.add")}
           </button>
         </div>
@@ -169,7 +169,9 @@ export default function ComboWorkspace({
         </div>
         )}
         <div className="combos-workspace-rail-list">
-          {filtered.length === 0 && combos.length > 0 ? (
+          {creatingFirstCombo ? (
+            <div className="combos-workspace-rail-empty"><strong>{t("cws.emptyTitle")}</strong><p>{t("cws.empty.createDesc")}</p></div>
+          ) : filtered.length === 0 && combos.length > 0 ? (
             <p className="muted" style={{ padding: "16px" }}>{t("cws.noSearchResults")}</p>
           ) : (
             <>
@@ -214,7 +216,7 @@ export default function ComboWorkspace({
       </aside>
 
       <div className="combos-workspace-main">
-        {baseline ? (
+        {baseline && selected ? (
           <DetailPanel
             key={baseline.id}
             apiBase={apiBase}
@@ -237,7 +239,7 @@ export default function ComboWorkspace({
                 setSelectedId(item.id);
                 setLocalBaseline(null);
               } else {
-                setLocalBaseline(item);
+                setLocalBaseline({ source: selected, item });
               }
               onRefresh();
             }}
@@ -262,7 +264,7 @@ export default function ComboWorkspace({
             onSaved={(item) => {
               setDetailDirty(false);
               setSelectedId(item.id);
-              setLocalBaseline(item);
+              setLocalBaseline(null);
               onCreated(item.id);
             }}
             onSave={onSave}

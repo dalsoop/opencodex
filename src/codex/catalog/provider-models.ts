@@ -9,6 +9,7 @@ import { createHash, createHmac, randomBytes } from "node:crypto";
 import { copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync } from "node:fs";
 import { delimiter, dirname, join, resolve } from "node:path";
 import { atomicWriteFile, expandUserPath, getConfigDir, websocketsEnabled } from "../../config";
+import { isProviderApiKeyPaused } from "../../providers/api-key-pause";
 import { resolveProviderApiKey } from "../../providers/key-store";
 import { captureOAuthAccountSelection, credentialGeneration, getAccountCredentialWithStatus, getAccountSet } from "../../oauth/store";
 import { readKiroAccountModels, kiroObservedContextWindow } from "../../providers/kiro-model-catalog";
@@ -53,7 +54,8 @@ import {
 import type { FastPolicyAuthority } from "../../providers/fastwire";
 import { effectiveGoogleMode, getProviderRegistryEntry, providerMatchesRegistryTransport, registryEntryForProviderDestination } from "../../providers/registry";
 import { parseAntigravityAvailableModels, registerAntigravityDiscoveredWireModels } from "../../providers/antigravity-models";
-import { recordAntigravityAccountRoster } from "../../providers/antigravity-account-roster";
+import { captureAntigravityModelObservation, recordAntigravityAccountRoster } from "../../providers/antigravity-account-roster";
+import { antigravityActiveAccountCurrent, discoverAntigravitySiblings } from "./antigravity-discovery";
 import { applyProviderContextCap, providerContextCap, resolveUnknownRoutedContextWindow } from "../../providers/context-cap";
 import { clampAutoCompactTokenLimit } from "../../providers/auto-compact-budget";
 import { effectiveModelAliases } from "../../providers/default-aliases";
@@ -62,7 +64,7 @@ import { CODEX_GPT5_IDENTITY_LINE } from "../../adapters/identity";
 import { filterCursorConfiguredModelsByLiveDiscovery } from "../../adapters/cursor/discovery";
 import { fetchCursorUsableModels } from "../../adapters/cursor/live-models";
 import { cursorLiveRosterScope, recordLiveCursorClaudeModels, recordLiveCursorMaxModeModels } from "../../adapters/cursor/catalog";
-import { fetchQoderModels } from "../../adapters/qoder/live-models";
+import { discoverQoderModels, markQoderDiscoveryCommitted, qoderDiscoveryJoinable, uncommittedQoderDiscovery } from "../../adapters/qoder/live-models";
 import { resolveQoderProfile } from "../../adapters/qoder/profiles";
 import { CODEBUDDY_PROFILES, type CodeBuddyProfile } from "../../adapters/codebuddy/profiles";
 import { fetchCodeBuddyModels } from "../../adapters/codebuddy/live-models";
@@ -88,6 +90,7 @@ import {
   providerRedirectError,
 } from "../../lib/provider-outbound";
 import { redactSecretString } from "../../lib/redact";
+import { invalidModelDiscoveryHint, shouldWarnSkippedModelRows } from "../../providers/model-discovery-diagnostic";
 import {
   extractProviderModelItems,
   isRegistryModelDiscoveryUrl,
@@ -117,6 +120,7 @@ import type {
   CatalogTrustedOpenAiApiPolicySnapshot,
 } from "../convergence-types";
 import type { CapturedProviderGather, CatalogGatherProviderAuthOutcome, CatalogGatherProviderModelOutcome, ModelsAuthResolution, ModelsAuthResolver } from "./gather-capture";
+import { workBuddyCatalogIdentity } from "../../providers/workbuddy";
 import { QUIET_AUTHORITATIVE_CATALOG_PROVIDERS, applyConfigHintsToCachedModels, applyProviderConfigHints, boundedOwnedBy, catalogHintsFromModelsApiItem, catalogHintsFromProviderConfig, withVisionSidecarInput } from "./model-hints";
 import { mergeConfiguredModelsIntoLiveCatalog, shouldExposeProviderModel, warnDroppedConfiguredIdsOnce } from "./model-visibility";
 import { captureModelsRequest, captureProviderGather, materializeCapturedHeaders } from "./gather-capture";
@@ -161,6 +165,7 @@ export function observedModelsAuthResolver(
         observed: true,
         oauthAccountId: observation.snapshot.accountId,
         oauthGeneration: observation.snapshot.generation,
+        ...(observation.snapshot.workbuddy ? { workbuddy: observation.snapshot.workbuddy } : {}),
         ...(observation.snapshot.providerUserId ? { oauthProviderUserId: observation.snapshot.providerUserId } : {}),
         ...(observation.snapshot.apiBaseUrl ? { oauthApiBaseUrl: observation.snapshot.apiBaseUrl } : {}),
         ...(observation.snapshot.projectId ? { oauthProjectId: observation.snapshot.projectId } : {}),
@@ -208,11 +213,10 @@ export async function fetchProviderModelsWithAuth(
     ...(prov.models ?? []),
     ...(prov.retainModels ?? []),
   ])];
-  const configured: CatalogModel[] = configuredIds.map(id => ({
-    id,
-    provider: name,
-    ...catalogHintsFromProviderConfig(name, prov, id, contextCap, metadataModelIdCaseFold, captured.effectiveAlias, metadataConfigDir, false),
-  }));
+  const configured: CatalogModel[] = configuredIds.map(id => applyProviderConfigHints(
+    name, prov, { id, provider: name }, contextCap, metadataModelIdCaseFold,
+    captured.effectiveAlias, metadataConfigDir, false,
+  ));
   const withConfiguredRetention = (
     models: CatalogModel[],
     options?: { retainComboTargets?: boolean; warnDrops?: boolean },
@@ -280,6 +284,7 @@ export async function fetchProviderModelsWithAuth(
           observed: false,
           oauthAccountId: snapshot.accountId,
           oauthGeneration: snapshot.generation,
+          ...(snapshot.workbuddy ? { workbuddy: snapshot.workbuddy } : {}),
           ...(snapshot.providerUserId ? { oauthProviderUserId: snapshot.providerUserId } : {}),
           ...(snapshot.apiBaseUrl ? { oauthApiBaseUrl: snapshot.apiBaseUrl } : {}),
           ...(snapshot.projectId ? { oauthProjectId: snapshot.projectId } : {}),
@@ -288,6 +293,9 @@ export async function fetchProviderModelsWithAuth(
       : { apiKey: await resolveModelsAuthToken(name, prov), observed: false }
     : resolveAuth.resolve(name, prov));
   const apiKey = auth.apiKey;
+  if ((prov.authMode === "oauth" && !apiKey) || isProviderApiKeyPaused(prov)) {
+    return observed(configured, "degraded");
+  }
   if (name === "github-copilot" && apiKey) {
     const transport = resolveGithubCopilotTransport({ ...prov, apiKey }, prov.authMode === "oauth"
       ? resolveCopilotApiBaseUrl(auth.oauthApiBaseUrl) : undefined);
@@ -447,19 +455,26 @@ export async function fetchProviderModelsWithAuth(
     // fingerprint so an account switch cannot observe another account's roster, even if a caller
     // bypasses the normal config mutation path that clears provider caches.
     const authorityIdentity = createHash("sha256").update(apiKey).digest("hex");
-    const fresh = getFreshCached(name, ttlMs, Date.now(), authorityIdentity);
+    const discoveryScope = `${name}\0${cacheGeneration}`;
+    // A finished run no gather has stored yet (the dashboard test stopped waiting for it) outranks
+    // a fresh cached roster; the cached roster stays as the fallback until this one is stored (#8115).
+    const unstored = uncommittedQoderDiscovery(profile, apiKey, discoveryScope);
+    const fresh = unstored ? null : getFreshCached(name, ttlMs, Date.now(), authorityIdentity);
     if (fresh) {
       return observed(withConfiguredRetention(
         applyConfigHintsToCachedModels(name, prov, fresh, contextCap, metadataModelIdCaseFold, captured.effectiveAlias, metadataConfigDir, false),
       ), "authoritative");
     }
     const scopedStale = getStaleCached(name, authorityIdentity);
-    if (isModelsFetchCoolingDown(name) && scopedStale) {
+    // A run another caller started (the dashboard test) is joined even inside the failure
+    // cooldown: its late success is what the catalog re-sync after it is waiting for.
+    if (!unstored && isModelsFetchCoolingDown(name) && scopedStale && !qoderDiscoveryJoinable(profile, apiKey, discoveryScope)) {
       return observed(withConfiguredRetention(
         applyConfigHintsToCachedModels(name, prov, scopedStale, contextCap, metadataModelIdCaseFold, captured.effectiveAlias, metadataConfigDir, false),
       ), "degraded");
     }
-    const live = await fetchQoderModels(profile, apiKey);
+    // Background discovery: waits for the full CLI bound, shared with any concurrent caller.
+    const live = unstored ?? await discoverQoderModels(profile, apiKey, discoveryScope);
     if (live.ok) {
       const discovered = live.models.map(id => ({
         id,
@@ -470,6 +485,7 @@ export async function fetchProviderModelsWithAuth(
       if (!setCached(name, forCache, Date.now(), cacheGeneration, authorityIdentity)) {
         return observed(withConfiguredRetention(configured), "degraded");
       }
+      markQoderDiscoveryCommitted(profile, apiKey, discoveryScope);
       markProviderDiscoveryOk(name, live.models.length);
       return observed(withConfiguredRetention(forCache, { warnDrops: true }), "authoritative");
     }
@@ -637,16 +653,13 @@ export async function fetchProviderModelsWithAuth(
       "degraded",
     );
   }
-  if (prov.authMode === "oauth" && !apiKey) {
-    // No usable token (logged out, or account marked needsReauth). Still surface the
-    // configured static catalog so the GUI Models tab / rail counts are not empty —
-    // matching Cursor's !apiKey → configured degradation and fetch-failure fallback.
-    return observed(configured, "degraded");
-  }
   const cloudCodeAssist = effectiveGoogleMode(name, prov) === "cloud-code-assist";
   const project = prov.project ?? auth.oauthProjectId;
   if (cloudCodeAssist && !project) return observed(configured, "degraded");
-  const fresh = getFreshCached(name, ttlMs);
+  // WorkBuddy model entitlements belong to the captured account and tenant.
+  const catalogAuthority = name === "workbuddy-ai"
+    ? workBuddyCatalogIdentity(apiKey!, auth.workbuddy) : undefined;
+  const fresh = getFreshCached(name, ttlMs, Date.now(), catalogAuthority);
   if (fresh) {
     return observed(
       withConfiguredRetention(
@@ -655,10 +668,10 @@ export async function fetchProviderModelsWithAuth(
       "authoritative",
     ); // dedups Codex's frequent /v1/models polling within the TTL
   }
-  if (isModelsFetchCoolingDown(name)) {
+  if (isModelsFetchCoolingDown(name, undefined, undefined, catalogAuthority)) {
     // A recently-failed provider (unreachable API, missing proxy, bad key) must not re-pay the
     // fetch timeout on every catalog poll — the dashboard polls this path per page load.
-    const stale = getStaleCached(name);
+    const stale = getStaleCached(name, catalogAuthority);
     return observed(
       withConfiguredRetention(
         stale
@@ -671,7 +684,7 @@ export async function fetchProviderModelsWithAuth(
   // The captured request predates any refresh, so a refreshing gather rebuilds it
   // from the auth it resolved: the token and its origin, together.
   const request = resolveAuth.kind === "refreshing" && name !== "anthropic2"
-    ? captureModelsRequest(name, prov, auth.oauthApiBaseUrl)
+    ? captureModelsRequest(name, prov, auth.oauthApiBaseUrl, auth.workbuddy)
     : captured.request;
   const url = request.url;
   let headers = materializeCapturedHeaders(request, apiKey);
@@ -701,9 +714,9 @@ export async function fetchProviderModelsWithAuth(
     // suppress an identical repeated failure (#395 log flood). The failure stays observable via the
     // discovery-status API regardless.
     const shouldLog = shouldLogDiscoveryFailure(name, failure);
-    markModelsFetchFailure(name);
+    markModelsFetchFailure(name, undefined, catalogAuthority);
     markProviderDiscoveryFailed(name, failure);
-    const stale = getStaleCached(name);
+    const stale = getStaleCached(name, catalogAuthority);
     return {
       models: withConfiguredRetention(
         stale
@@ -724,6 +737,7 @@ export async function fetchProviderModelsWithAuth(
     // fetch a different URL and keep the rejection.
     if (!maySendAnthropicDiscovery()) return observed(withConfiguredRetention(failedDiscoveryConfigured), "degraded");
     const outboundDependencies = { isCanonicalUrl: isRegistryModelDiscoveryUrl, beforeSend: maySendAnthropicDiscovery };
+    const antigravityObservation = cloudCodeAssist ? captureAntigravityModelObservation() : undefined;
     const res = request.method === "POST"
       ? await providerOutboundPost(name, prov, url, {
         headers,
@@ -785,7 +799,19 @@ export async function fetchProviderModelsWithAuth(
       return observed(models, "degraded");
     }
     if (antigravity) {
-      const upstream: CatalogModel[] = antigravity.map(model => ({
+      if (getConfigDir() !== metadataConfigDir) return observed(withConfiguredRetention(configured), "degraded");
+      // A needsReauth/replacement of the active account stops every later sibling refresh and send.
+      const activeCurrent = () => isCurrentCacheGeneration() && (!auth.oauthAccountId
+        || antigravityActiveAccountCurrent(name, auth.oauthAccountId, apiKey, auth.oauthGeneration));
+      const admitSiblings = resolveAuth.kind === "refreshing" && name === "google-antigravity"
+        && prov.authMode === "oauth" && auth.oauthAccountId
+        ? await discoverAntigravitySiblings(name, prov, auth.oauthAccountId, request, discovery.maxResponseBytes, discovery.maxModels, metadataConfigDir, activeCurrent)
+        : () => [];
+      if (!activeCurrent() || getConfigDir() !== metadataConfigDir) return observed(withConfiguredRetention(configured), "degraded");
+      const byId = new Map(antigravity.map(model => [model.id, model]));
+      for (const model of admitSiblings()) if (!byId.has(model.id)) byId.set(model.id, model);
+      const merged = [...byId.values()];
+      const upstream: CatalogModel[] = merged.map(model => ({
         id: model.id,
         provider: name,
         // Only an exact discovered wire map proves a new model's selectable effort ladder.
@@ -805,14 +831,14 @@ export async function fetchProviderModelsWithAuth(
       }
       // Save exact family routes before publishing synthetic IDs. These synchronous writes
       // cannot interleave with a credential-generation change; failure keeps the prior cache.
-      registerAntigravityDiscoveredWireModels(prov.baseUrl, antigravity, {
+      registerAntigravityDiscoveredWireModels(prov.baseUrl, merged, {
         provider: name,
         cacheGeneration,
       });
       // Entitlement is per account (Claude 4.6 vs 5.5, Argon): remember what THIS account
       // lists so account selection can prefer one that serves the requested model.
-      if (auth.oauthAccountId) recordAntigravityAccountRoster(name, auth.oauthAccountId, antigravity);
-      if (!setCached(name, forCache, Date.now(), cacheGeneration)) {
+      if (auth.oauthAccountId) recordAntigravityAccountRoster(name, auth.oauthAccountId, antigravity, Date.now(), antigravityObservation);
+      if (!setCached(name, forCache, Date.now(), cacheGeneration, catalogAuthority)) {
         return observed(withConfiguredRetention(configured), "degraded");
       }
       markProviderDiscoveryOk(name, live.length);
@@ -836,10 +862,17 @@ export async function fetchProviderModelsWithAuth(
       };
       if (shouldLog) {
         console.warn(
-          `[opencodex] Provider model discovery for "${name}" ${diagnostic[extracted.reason]} [status=${res.status}, contentType=${contentType}, urlClass=${urlClass}, fallback=${fallback}].`,
+          `[opencodex] Provider model discovery for "${name}" ${diagnostic[extracted.reason]} [status=${res.status}, contentType=${contentType}, urlClass=${urlClass}, fallback=${fallback}]${extracted.reason === "invalid_shape" ? invalidModelDiscoveryHint("diagnostic" in extracted ? extracted.diagnostic : undefined, discovery.skipInvalidRows === true) : "."}`,
         );
       }
       return observed(models, "degraded");
+    }
+    // The operator opted into skipping invalid rows (#7910): say how many, once, never which.
+    const skippedInvalidRows = "skippedInvalidRows" in extracted ? extracted.skippedInvalidRows ?? 0 : 0;
+    if (shouldWarnSkippedModelRows(name, skippedInvalidRows, extracted.rawCount)) {
+      console.warn(
+        `[opencodex] Provider model discovery for "${name}" skipped ${skippedInvalidRows} invalid of ${extracted.rawCount} rows (modelDiscovery.skipInvalidRows) [status=${res.status}, urlClass=${urlClass}].`,
+      );
     }
     const items = extracted.items;
     // Ollama Cloud enrichment: /v1/models carries no per-model context or capability metadata,
@@ -898,7 +931,7 @@ export async function fetchProviderModelsWithAuth(
         `[opencodex] Provider model discovery for "${name}" returned an authoritative empty catalog; ${droppedConfiguredIds.length > 0 ? `dropping configured model ids: ${droppedConfiguredIds.join(", ")}` : "no models will be exposed"}.`,
       );
     }
-    if (!maySendAnthropicDiscovery() || !setCached(name, forCache, Date.now(), cacheGeneration)) {
+    if (!maySendAnthropicDiscovery() || !setCached(name, forCache, Date.now(), cacheGeneration, catalogAuthority)) {
       return observed(withConfiguredRetention(configured), "degraded");
     }
     markProviderDiscoveryOk(name, liveModelCount);

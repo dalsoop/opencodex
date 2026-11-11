@@ -1,15 +1,244 @@
 import { expect, test } from "bun:test";
-import { chmodSync, existsSync, fsyncSync, fstatSync, mkdirSync, mkdtempSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { RemoteMessageStore, parseRemoteState } from "../../src/messaging/remote-store";
-import { readRemoteFile, removeRemoteFile, withRemoteLock, writeRemoteFile } from "../../src/messaging/remote-files";
+import { macAclOutputIsPrivate, readRemoteFile, withRemoteLock } from "../../src/messaging/remote-files";
+import { LocalMessagingError } from "../../src/messaging/types";
 import { remoteMessagingPair } from "../helpers/messaging-remote";
+import { repoPath } from "../helpers/repo-root";
 
 const unixTest = test.skipIf(process.platform === "win32");
-unixTest("publication syncs the file before rename and its directory afterwards, closing both descriptors", () => {
+test("macOS ACL inspection distinguishes plain metadata from access entries", () => {
+  expect(macAclOutputIsPrivate("-rw-------  1 owner  staff  4 Oct 22 00:00 state.json\n")).toBe(true);
+  expect(macAclOutputIsPrivate("-rw-------+ 1 owner  staff  4 Oct 22 00:00 state.json\n 0: everyone allow read\n")).toBe(false);
+  expect(macAclOutputIsPrivate("")).toBe(false);
+});
+test.each(["acl", "error", "timeout"])("temporary ACL %s closes the descriptor and removes unpublished state", failure => {
+  const root = mkdtempSync(join(tmpdir(), "ocx-remote-acl-failure-"));
+  try {
+    // Keep built-in mocks and simulated macOS ownership out of every other test.
+    // File creation, descriptor checks, close and unlink use the real host filesystem.
+    const result = spawnSync(process.execPath, ["--eval", `
+      import { mock } from "bun:test";
+      import assert from "node:assert/strict";
+      import * as fs from "node:fs";
+      import * as childProcess from "node:child_process";
+      import * as path from "node:path";
+      const native = { ...fs }, root = ${JSON.stringify(root)}, failure = ${JSON.stringify(failure)};
+      const nativePath = { ...path }, { basename, join } = nativePath;
+      const target = "/fixture/journal.json", published = join(root, "journal.json");
+      native.writeFileSync(published, "old", { mode: 0o600 });
+      let fd, liveFd, temporary, probes = 0, writes = 0, syncs = 0, renames = 0;
+      const descriptors = [], closed = [];
+      Object.defineProperty(process, "platform", { value: "darwin" });
+      Object.defineProperty(process, "getuid", { value: () => 1234 });
+      mock.module("node:path", () => ({ ...nativePath, ...nativePath.posix }));
+      mock.module("node:fs", () => ({ ...native,
+        lstatSync(path) {
+          if (path === "/fixture" || path === "/") return {
+            uid: 1234, mode: 0o700,
+            isDirectory: () => true,
+            isSymbolicLink: () => false,
+          };
+          return native.lstatSync(join(root, basename(path)));
+        },
+        realpathSync: () => "/",
+        openSync(path, flags, mode) {
+          temporary = join(root, basename(path));
+          fd = native.openSync(temporary, flags, mode);
+          descriptors.push(fd); liveFd = fd;
+          return fd;
+        },
+        fstatSync(fd) { return Object.assign(native.fstatSync(fd), { uid: 1234, mode: 0o100600 }); },
+        closeSync(value) {
+          assert.equal(value, liveFd); native.closeSync(value); closed.push(value); liveFd = undefined;
+        },
+        writeFileSync(...args) { writes++; return native.writeFileSync(...args); },
+        renameSync() { renames++; throw new Error("unexpected publication"); },
+        unlinkSync(path) { native.unlinkSync(join(root, basename(path))); },
+      }));
+      mock.module("node:child_process", () => ({ ...childProcess, spawnSync(command, args, options) {
+        assert.equal(command, "/bin/ls");
+        assert.deepEqual(args.slice(0, 1), ["-lde"]);
+        assert.equal(options.timeout, 1000);
+        if (!basename(args[1]).startsWith(".write-")) return {
+          status: 0, stderr: "", stdout: "drwx------ 1 owner staff 0 Oct 22 00:00 fixture\\n",
+        };
+        probes++;
+        assert.equal(native.fstatSync(fd).isFile(), true);
+        assert.equal(native.existsSync(temporary), true);
+        if (failure === "acl") return { status: 0, stderr: "",
+          stdout: "-rw-------+ 1 owner staff 0 Oct 22 00:00 state\\n 0: everyone allow read\\n" };
+        return { status: null, stderr: "", stdout: "",
+          error: Object.assign(new Error("fixture ACL probe failure"), {
+            code: failure === "timeout" ? "ETIMEDOUT" : "EIO",
+          }) };
+      } }));
+      const { writeRemoteFile } = await import(${JSON.stringify(pathToFileURL(repoPath("src/messaging/remote-files.ts")).href)});
+      const { LocalMessagingError } = await import(${JSON.stringify(pathToFileURL(repoPath("src/messaging/types.ts")).href)});
+      try {
+        let refusal;
+        try { writeRemoteFile(target, "unpublished", () => { syncs++; }); }
+        catch (error) { refusal = error; }
+        if (!probes) throw refusal;
+        assert.equal(probes, 1);
+        assert.equal(writes, 0); assert.equal(syncs, 0); assert.equal(renames, 0);
+        assert.equal(descriptors.length, 2); assert.deepEqual(closed, descriptors);
+        assert.equal(native.existsSync(temporary), false);
+        assert.equal(native.readFileSync(published, "utf8"), "old");
+        assert.deepEqual(native.readdirSync(root), ["journal.json"]);
+        assert.ok(refusal instanceof LocalMessagingError);
+        assert.equal(refusal.code, "unsafe_remote_storage");
+        assert.equal(refusal.message.includes("fixture ACL probe failure"), false);
+        assert.equal(refusal.message.includes("everyone allow read"), false);
+      } finally {
+        // Even the deliberately red regression run must release its fixture descriptor.
+        if (liveFd !== undefined) native.closeSync(liveFd);
+      }
+    `], { encoding: "utf8", timeout: 10_000, windowsHide: true });
+    expect(result.error).toBeUndefined();
+    expect(result.stderr).toBe("");
+    expect(result.status).toBe(0);
+  } finally { rmSync(root, { recursive: true }); }
+});
+test.each(["acl", "error", "timeout"])("post-rename ACL %s reports unknown publication without retry or rollback", failure => {
+  const root = mkdtempSync(join(tmpdir(), "ocx-remote-published-acl-"));
+  try {
+    // Only the destination probe after real replacement fails; earlier ACL checks pass.
+    const result = spawnSync(process.execPath, ["--eval", `
+      import { mock } from "bun:test";
+      import assert from "node:assert/strict";
+      import * as fs from "node:fs";
+      import * as childProcess from "node:child_process";
+      import * as path from "node:path";
+      const native = { ...fs }, root = ${JSON.stringify(root)}, failure = ${JSON.stringify(failure)};
+      const nativePath = { ...path }, { basename, join } = nativePath;
+      const target = "/fixture/journal.json", published = join(root, "journal.json");
+      native.writeFileSync(published, "old", { mode: 0o600 });
+      let renames = 0, writes = 0, syncs = 0, directoryOpens = 0, postRenameProbes = 0;
+      const probes = [], descriptors = [], closed = [];
+      Object.defineProperty(process, "platform", { value: "darwin" });
+      Object.defineProperty(process, "getuid", { value: () => 1234 });
+      mock.module("node:path", () => ({ ...nativePath, ...nativePath.posix }));
+      mock.module("node:fs", () => ({ ...native,
+        lstatSync(path) {
+          if (path === "/fixture" || path === "/") return {
+            uid: 1234, mode: 0o700, isDirectory: () => true, isSymbolicLink: () => false,
+          };
+          return native.lstatSync(join(root, basename(path)));
+        },
+        realpathSync: () => "/",
+        openSync(path, flags, mode) {
+          if (path === "/") { directoryOpens++; throw new Error("unexpected directory sync"); }
+          const fd = native.openSync(join(root, basename(path)), flags, mode);
+          descriptors.push(fd); return fd;
+        },
+        closeSync(fd) { native.closeSync(fd); closed.push(fd); },
+        fstatSync(fd) { return Object.assign(native.fstatSync(fd), { uid: 1234, mode: 0o100600 }); },
+        writeFileSync(...args) { writes++; return native.writeFileSync(...args); },
+        renameSync(from, to) {
+          assert.equal(native.readFileSync(published, "utf8"), "old");
+          native.renameSync(join(root, basename(from)), join(root, basename(to))); renames++;
+        },
+        unlinkSync(path) { native.unlinkSync(join(root, basename(path))); },
+      }));
+      mock.module("node:child_process", () => ({ ...childProcess, spawnSync(command, args, options) {
+        assert.equal(command, "/bin/ls"); assert.equal(options.timeout, 1000);
+        probes.push(args[1]);
+        if (args[1] !== target || !renames) return { status: 0, stderr: "",
+          stdout: (args[1] === "/fixture" ? "drwx------" : "-rw-------") + " 1 owner staff 3 Oct 22 00:00 state\\n" };
+        postRenameProbes++;
+        assert.equal(native.readFileSync(published, "utf8"), "new");
+        if (failure === "acl") return { status: 0, stderr: "",
+          stdout: "-rw-------+ 1 owner staff 3 Oct 22 00:00 state\\n 0: everyone allow read\\n" };
+        return { status: null, stderr: "", stdout: "", error: Object.assign(new Error("private ACL diagnostic"), {
+          code: failure === "timeout" ? "ETIMEDOUT" : "EIO",
+        }) };
+      } }));
+      const { writeRemoteFile } = await import(${JSON.stringify(pathToFileURL(repoPath("src/messaging/remote-files.ts")).href)});
+      const { LocalMessagingError } = await import(${JSON.stringify(pathToFileURL(repoPath("src/messaging/types.ts")).href)});
+      let thrown;
+      try { writeRemoteFile(target, "new", fd => { syncs++; native.fsyncSync(fd); }); }
+      catch (error) { thrown = error; }
+      if (!postRenameProbes) throw thrown;
+      assert.equal(postRenameProbes, 1);
+      assert.equal(probes.length, 5);
+      assert.deepEqual(probes.slice(0, 3), ["/fixture", "/fixture", target]);
+      assert.equal(basename(probes[3]).startsWith(".write-"), true);
+      assert.equal(probes[4], target);
+      assert.equal(renames, 1); assert.equal(writes, 1); assert.equal(syncs, 1); assert.equal(directoryOpens, 0);
+      assert.equal(native.readFileSync(published, "utf8"), "new");
+      assert.deepEqual(native.readdirSync(root), ["journal.json"]);
+      assert.ok(descriptors.length > 0); assert.deepEqual(closed, descriptors);
+      assert.ok(thrown instanceof LocalMessagingError);
+      assert.equal(thrown.code, "remote_storage_unknown");
+      assert.match(thrown.message, /replaced/);
+      assert.match(thrown.message, /ACL.*could not be confirmed/);
+      assert.match(thrown.message, /inspect.*before.*recovery/);
+      assert.equal(thrown.message.includes("private ACL diagnostic"), false);
+    `], { encoding: "utf8", timeout: 10_000, windowsHide: true });
+    expect(result.error).toBeUndefined();
+    expect(result.stderr).toBe("");
+    expect(result.status).toBe(0);
+  } finally { rmSync(root, { recursive: true }); }
+});
+const macTest = process.platform === "darwin" ? test : test.skip;
+macTest("macOS extended ACLs are refused on messaging directories and files", () => {
+  const root = mkdtempSync(join(tmpdir(), "ocx-remote-acl-")), home = join(root, "ocx"), store = new RemoteMessageStore(home);
+  try {
+    mkdirSync(home, { mode: 0o755 }); const enabled = store.enable();
+    for (const path of [store.directory, store.path]) {
+      expect(store.read()).toEqual(enabled);
+      const mode = statSync(path).mode;
+      expect(mode & 0o077).toBe(0);
+      const added = spawnSync("/bin/chmod", ["+a", "everyone allow read", path], { encoding: "utf8", timeout: 1_000 });
+      expect(added.error).toBeUndefined(); expect(added.status).toBe(0);
+      expect(statSync(path).mode).toBe(mode);
+      let refusal: unknown;
+      try { store.read(); } catch (error) { refusal = error; }
+      expect(refusal).toBeInstanceOf(LocalMessagingError);
+      expect((refusal as LocalMessagingError).code).toBe("unsafe_remote_storage");
+      const removed = spawnSync("/bin/chmod", ["-N", path], { encoding: "utf8", timeout: 1_000 });
+      expect(removed.error).toBeUndefined(); expect(removed.status).toBe(0);
+      expect(statSync(path).mode).toBe(mode);
+      expect(store.read()).toEqual(enabled);
+    }
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+// Built-in module mocks stay in a child. Observe each open/close lifetime, rather
+// than probing an old fd number that the runtime can already have reused (even for a socket).
+function assertRemoteFileDescriptors(body: string): void {
+  const result = spawnSync(process.execPath, ["--eval", `
+    import { expect, mock } from "bun:test";
+    import * as fs from "node:fs";
+    import { tmpdir } from "node:os";
+    import { join } from "node:path";
+    const native = { ...fs }, opened = [], closed = [], live = new Map();
+    const { existsSync, fstatSync, fsyncSync, mkdtempSync, rmSync } = native;
+    mock.module("node:fs", () => ({ ...native,
+      openSync(...args) {
+        const fd = native.openSync(...args), handle = { fd, generation: opened.length };
+        opened.push(handle); live.set(fd, handle); return fd;
+      },
+      closeSync(fd) {
+        closed.push(live.get(fd)); native.closeSync(fd); live.delete(fd);
+      },
+    }));
+    const { writeRemoteFile, readRemoteFile, removeRemoteFile } = await import(${JSON.stringify(pathToFileURL(repoPath("src/messaging/remote-files.ts")).href)});
+    try {
+      ${body}
+      expect(opened.length).toBeGreaterThan(0);
+      expect(closed).toEqual(opened); expect(live.size).toBe(0);
+    } finally { for (const fd of live.keys()) native.closeSync(fd); }
+  `], { encoding: "utf8", windowsHide: true });
+  expect(result.error).toBeUndefined(); expect(result.stderr).toBe(""); expect(result.status).toBe(0);
+}
+unixTest("publication syncs the file before rename and its directory afterwards, closing both descriptors", () => assertRemoteFileDescriptors(`
   const root = mkdtempSync(join(tmpdir(), "ocx-remote-sync-")), path = join(root, "journal.json");
-  const synced: { fd: number; directory: boolean }[] = [];
+  const synced = [];
   try {
     writeRemoteFile(path, "durable", fd => {
       const directory = fstatSync(fd).isDirectory();
@@ -18,47 +247,46 @@ unixTest("publication syncs the file before rename and its directory afterwards,
     });
     expect(synced.map(item => item.directory)).toEqual([false, true]);
     expect(readRemoteFile(path)).toBe("durable");
-    for (const item of synced) expect(() => fstatSync(item.fd)).toThrow();
   } finally { rmSync(root, { recursive: true, force: true }); }
-});
-unixTest("a failed directory sync reports uncertain durability without erasing the published journal", () => {
+`));
+unixTest("a failed directory sync reports uncertain durability without erasing the published journal", () => assertRemoteFileDescriptors(`
   const root = mkdtempSync(join(tmpdir(), "ocx-remote-sync-fail-")), path = join(root, "journal.json");
-  let directoryFd = -1;
+  let directorySyncs = 0;
   try {
     expect(() => writeRemoteFile(path, "retained", fd => {
-      if (fstatSync(fd).isDirectory()) { directoryFd = fd; throw new Error("private sync diagnostic"); }
+      if (fstatSync(fd).isDirectory()) { directorySyncs++; throw new Error("private sync diagnostic"); }
       fsyncSync(fd);
     })).toThrow("durability could not be confirmed");
-    expect(readRemoteFile(path)).toBe("retained"); expect(() => fstatSync(directoryFd)).toThrow();
+    expect(directorySyncs).toBe(1); expect(readRemoteFile(path)).toBe("retained");
   } finally { rmSync(root, { recursive: true, force: true }); }
-});
-unixTest("file sync failure cannot publish a replacement or reach the directory sync", () => {
+`));
+unixTest("file sync failure cannot publish a replacement or reach the directory sync", () => assertRemoteFileDescriptors(`
   const root = mkdtempSync(join(tmpdir(), "ocx-remote-file-fail-")), path = join(root, "journal.json");
-  let fileFd = -1;
+  let fileSyncs = 0;
   try {
     writeRemoteFile(path, "old");
     expect(() => writeRemoteFile(path, "new", fd => {
-      fileFd = fd; expect(fstatSync(fd).isFile()).toBe(true); throw new Error("fixture file sync failed");
+      fileSyncs++; expect(fstatSync(fd).isFile()).toBe(true); throw new Error("fixture file sync failed");
     })).toThrow("fixture file sync failed");
-    expect(readRemoteFile(path)).toBe("old"); expect(() => fstatSync(fileFd)).toThrow();
+    expect(fileSyncs).toBe(1); expect(readRemoteFile(path)).toBe("old");
   } finally { rmSync(root, { recursive: true, force: true }); }
-});
-unixTest("journal removal syncs its absence and reports a failed durability barrier", () => {
+`));
+unixTest("journal removal syncs its absence and reports a failed durability barrier", () => assertRemoteFileDescriptors(`
   const root = mkdtempSync(join(tmpdir(), "ocx-remote-remove-sync-")), path = join(root, "journal.json");
-  let directoryFd = -1;
+  let directorySyncs = 0;
   try {
     writeRemoteFile(path, "old");
     removeRemoteFile(path, undefined, fd => {
-      directoryFd = fd; expect(fstatSync(fd).isDirectory()).toBe(true); expect(existsSync(path)).toBe(false); fsyncSync(fd);
+      directorySyncs++; expect(fstatSync(fd).isDirectory()).toBe(true); expect(existsSync(path)).toBe(false); fsyncSync(fd);
     });
-    expect(() => fstatSync(directoryFd)).toThrow();
+    expect(directorySyncs).toBe(1);
     writeRemoteFile(path, "new");
     expect(() => removeRemoteFile(path, undefined, fd => {
-      directoryFd = fd; throw new Error("private removal sync error");
+      directorySyncs++; expect(fstatSync(fd).isDirectory()).toBe(true); throw new Error("private removal sync error");
     })).toThrow("durability could not be confirmed");
-    expect(existsSync(path)).toBe(false); expect(() => fstatSync(directoryFd)).toThrow();
+    expect(directorySyncs).toBe(2); expect(existsSync(path)).toBe(false);
   } finally { rmSync(root, { recursive: true, force: true }); }
-});
+`));
 unixTest("enable preserves a trusted 0755 configuration home and creates private messaging state", () => {
   const root = mkdtempSync(join(tmpdir(), "ocx-remote-home-")), home = join(root, "ocx"), store = new RemoteMessageStore(home);
   try {

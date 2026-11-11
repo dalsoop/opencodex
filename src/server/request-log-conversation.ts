@@ -173,14 +173,79 @@ export function conversationIdFromResponsesRequest(input: {
 }
 
 /**
+ * Hermes Agent session affinity header for log correlation (#330).
+ * Kept separate from runtime/session identities so it cannot affect lanes or routing.
+ */
+export function conversationIdFromHermesHeader(headers: Headers): string | undefined {
+  return normalizeLogConversationId(headers.get("x-hermes-conversation-id"));
+}
+
+/**
+ * Validates and normalizes native header candidates in priority order for logging:
+ * parent-thread -> session_id -> session-id -> thread-id.
+ * Each candidate spelling is evaluated and normalized independently so an empty or
+ * whitespace-only candidate (e.g. empty session_id) cannot suppress a subsequent valid candidate.
+ */
+export function nativeLogConversationIdFromHeaders(headers: Headers): string | undefined {
+  return (
+    normalizeLogConversationId(headers.get("x-codex-parent-thread-id")) ??
+    normalizeLogConversationId(headers.get("session_id")) ??
+    normalizeLogConversationId(headers.get("session-id")) ??
+    normalizeLogConversationId(headers.get("thread-id"))
+  );
+}
+
+/** The request-log context's conversation slot; structural so callers need not import request-log. */
+export interface LogConversationSlot {
+  conversationId?: string;
+  conversationIdIsHermesFallback?: boolean;
+}
+
+/**
+ * Record a native log identity. Fills an empty slot or replaces the log-only Hermes fallback,
+ * so a native id found late (Responses preparation, a Cursor conversation created mid-turn)
+ * still wins. A caller-owned id already in the slot (routed Claude metadata) is kept.
+ */
+export function assignNativeLogConversationId(slot: LogConversationSlot, nativeId: string | undefined): void {
+  if (!nativeId || (slot.conversationId && !slot.conversationIdIsHermesFallback)) return;
+  slot.conversationId = nativeId;
+  delete slot.conversationIdIsHermesFallback;
+}
+
+/** Fill an empty slot with the log-only Hermes digest, marked so any native id replaces it. */
+export function fillHermesLogConversationFallback(slot: LogConversationSlot, headers: Headers): void {
+  if (slot.conversationId) return;
+  const hermes = conversationIdFromHermesHeader(headers);
+  if (!hermes) return;
+  slot.conversationId = hermes;
+  slot.conversationIdIsHermesFallback = true;
+}
+
+/**
+ * Remote Claude Code adds a per-turn attribution token (`tk`) to its metadata.user_id JSON
+ * blob. Drop it, as Claude Code itself does, so every turn of one session keeps one identity.
+ * Any other user_id, including one that is nothing but `tk`, is returned unchanged.
+ */
+export function claudeSessionUserId(userId: string): string {
+  try {
+    const parsed: unknown = JSON.parse(userId);
+    if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed) && "tk" in parsed) {
+      const { tk: _tk, ...rest } = parsed as Record<string, unknown>;
+      if (Object.keys(rest).length > 0) return JSON.stringify(rest);
+    }
+  } catch { /* not JSON */ }
+  return userId;
+}
+
+/**
  * Claude Code metadata.user_id only — never the system-hash Desktop fallback.
- * Hashes the raw user_id once (same opacity goal as inbound prompt_cache_key).
+ * Hashes the session's user_id once (same opacity goal as inbound prompt_cache_key).
  */
 export function conversationIdFromClaudeMetadata(
   metadata: { user_id?: unknown } | null | undefined,
 ): string | undefined {
   if (!metadata || typeof metadata.user_id !== "string") return undefined;
-  return normalizeLogConversationId(metadata.user_id);
+  return normalizeLogConversationId(claudeSessionUserId(metadata.user_id));
 }
 
 /** @deprecated Prefer conversationIdFromClaudeMetadata; kept for call-site clarity. */

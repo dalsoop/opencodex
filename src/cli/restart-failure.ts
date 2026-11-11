@@ -1,5 +1,22 @@
 import type { ProxyRestartResult } from "./tray-proxy";
 
+export type RestartSupervisor = "desktop" | "service";
+
+/** Only the bound client's explicit refusal establishes a supervisor for sync. */
+export function supervisedRestartRefusal(result: ProxyRestartResult): RestartSupervisor | null {
+  if (result.ok || result.phase !== "request" || !(result.error instanceof Error)) return null;
+  if (result.error.message === "restart_supervised_desktop") return "desktop";
+  if (result.error.message === "restart_supervised_service") return "service";
+  return null;
+}
+
+export function deferSupervisedRestart(result: ProxyRestartResult, notify: (supervisor: RestartSupervisor) => void): boolean {
+  const supervisor = supervisedRestartRefusal(result);
+  if (!supervisor) return false;
+  notify(supervisor);
+  return true;
+}
+
 export const INCOMPLETE_INSTALL_RECOVERY = "If the installer already exited or failed, run `ocx status`, stop any running proxy through its owner (`ocx stop`, or its service or desktop app), then reinstall with the same package manager and start it again (see https://opencodex.me/troubleshooting/update-failed/).";
 
 export function reportRestartFailure(result: Extract<ProxyRestartResult, { ok: false }>): void {
@@ -16,6 +33,10 @@ export function reportRestartFailure(result: Extract<ProxyRestartResult, { ok: f
       console.error("The proxy home or lifecycle ownership could not be verified. Run `ocx status`; if a service owns the proxy, use its installation's `ocx service restart`, otherwise use the owning app or supervisor. No changes were made.");
     } else if (code === "restart_package_tree_unsettled") {
       console.error(`The proxy's package files are unsettled. Wait for the install to finish, then run \`ocx restart\`. ${INCOMPLETE_INSTALL_RECOVERY}`);
+    } else if (code === "restart_supervised_service") {
+      console.error("Restart not performed; the running client runtime was kept. Its background service owns it: run `ocx service restart`.");
+    } else if (code === "restart_supervised_desktop") {
+      console.error("Restart not performed; the running client runtime was kept. The OpenCodex desktop app owns it: restart it from the app.");
     } else {
       console.error("Proxy restart request could not be confirmed; no fallback stop/start was attempted. Run `ocx status` to inspect ownership and runtime state.");
     }

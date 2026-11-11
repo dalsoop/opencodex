@@ -15,7 +15,7 @@ function fixture(): OcxConfig {
   return { port: 10100, defaultProvider: "vendor", providers: { vendor: {
     adapter: "openai-chat", baseUrl: "https://fixture.invalid/v1", models: ["a", "b"], newModelPolicy: "off",
   } }, disabledModels: ["vendor/b"], modelDiscovery: {
-    knownModels: { vendor: { ids: ["a", "b"], removed: [], updatedAt: stamp, visibilityInitialized: true } },
+    knownModels: { vendor: { ids: ["a", "b"], removed: [], updatedAt: stamp } },
   } };
 }
 const bytes = () => readFileSync(home.path("config.json"), "utf8");
@@ -27,23 +27,6 @@ afterEach(() => {
   setPersistedConfigMutationBeforeCommitForTests(null);
   clearModelCache("vendor");
   home.remove();
-});
-
-test("first discovery persists default-only visibility before publication", () => {
-  const initial = fixture();
-  delete initial.disabledModels;
-  delete initial.modelDiscovery;
-  delete initial.providers.vendor.newModelPolicy;
-  initial.providers.vendor.defaultModel = "a";
-  saveConfig(initial);
-  const config = loadConfig();
-  expect(complete(config)).toBe(true);
-  expect(loadConfig().disabledModels).toEqual(["vendor/b", "vendor/c"]);
-  const enabled = loadConfig();
-  enabled.disabledModels = ["vendor/c"];
-  saveConfig(enabled);
-  expect(complete(config)).toBe(true);
-  expect(config.disabledModels).toEqual(["vendor/c"]);
 });
 
 test("discovery persists arrival and disable together, then preserves a manual enable without rewriting", () => {

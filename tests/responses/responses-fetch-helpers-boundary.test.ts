@@ -5,9 +5,40 @@ import { fileURLToPath } from "node:url";
 import { createScanner, LanguageVariant, SyntaxKind } from "typescript/unstable/ast";
 import { fetchWithHeaderTimeout, providerFetch, sendWithConnectionPolicy, storedPoolReplayDispatchNotifier } from "../../src/server/responses/fetch-helpers";
 import { repoRoot as resolveRepoRoot } from "../helpers/repo-root";
+import { createPhysicalSendReporter, createRequestExecutionBudget } from "../../src/lib/request-execution-budget";
+import { errorDestinationLabel, SendBudgetExhaustedError } from "../../src/lib/upstream-retry";
+import { physicalSendAccounting } from "../../src/server/responses/deferred-send-reporter";
 
 const repoRoot = resolveRepoRoot();
 const helperPath = resolve(repoRoot, "src/server/responses/fetch-helpers.ts");
+
+test("deferred accounting rejects reuse before counting an already consumed reservation", () => {
+  const budget = createRequestExecutionBudget();
+  const reservation = budget.reserveDispatch({ sendClass: "initial", targetKey: "fixture", countedExternally: true });
+  if (!reservation.allowed) throw new Error("fixture reservation was refused");
+  const accounting = physicalSendAccounting(createPhysicalSendReporter(budget, () => ({ poolId: "fixture" }), reservation.permit), {
+    permit: reservation.permit, destination: () => errorDestinationLabel("https://fixture.example/v1"),
+  });
+  try {
+    accounting.onPhysicalDispatch!();
+    accounting.report(1);
+    expect(budget.used).toBe(1);
+    expect(() => accounting.onPhysicalDispatch!()).toThrow(SendBudgetExhaustedError);
+    accounting.report(1);
+    expect(budget.used).toBe(1);
+  } finally { accounting.report.close?.(); reservation.permit.release(); }
+  expect(budget.used).toBe(1);
+});
+
+test("an unpaced physical send does not yield after its caller's credential validation", async () => {
+  const order: string[] = [];
+  queueMicrotask(() => order.push("credential-change"));
+  const executor = (async () => { order.push("send"); return new Response("ok"); }) as typeof fetch;
+  const pending = fetchWithHeaderTimeout("https://fixture.example/v1", {}, new AbortController().signal, 0, false, executor);
+  expect(order).toEqual(["send"]);
+  await pending;
+  expect(order).toEqual(["send", "credential-change"]);
+});
 
 describe("native Codex HTTP upload representation", () => {
   const endpoint = "https://chatgpt.com/backend-api/codex/responses";
@@ -182,6 +213,7 @@ describe("Responses fetch-helper import boundary", () => {
     expect(expectRuntimeImportBoundary(readFileSync(helperPath, "utf8"))).toEqual([
       // Import-free sent-header registry read by the request log (#6911).
       "../../lib/outbound-credential-registry",
+      "../../lib/provider-admission-wait",
       "../../lib/provider-egress",
       "../../lib/provider-tls-profile",
       "../../lib/proxy-env",
@@ -190,6 +222,8 @@ describe("Responses fetch-helper import boundary", () => {
       // Import-free plugin rewrite slot (src/plugins/upstream-hooks.ts).
       "../../plugins/upstream-hooks",
       "../../providers/request-pacing",
+      // Turn-state handle redemption at the send (src/server/turn-state-handles.ts); node: built-ins only.
+      "../turn-state-handles",
       // Opt-in request-body codec at the final send (#7247); runtime imports are node: built-ins only.
       "./request-compression",
       "./ws-upstream",
@@ -311,6 +345,43 @@ describe("storedPoolReplayDispatchNotifier", () => {
   test("returns the executor untouched when there is nothing to notify", () => {
     const executor = pacedExecutor({ pacing: async () => {} });
     expect(storedPoolReplayDispatchNotifier(executor.wrapped, undefined)).toBe(executor.wrapped);
+  });
+
+  // The header deadline that cut large local-model prompts: resolveConnectTimeoutMs hands a
+  // non-positive budget for a local upstream with no explicit connectTimeoutMs, and the helper
+  // must then arm no header clock so a slow prefill is bounded only by the caller's abort signal.
+  describe("non-positive header budget arms no deadline", () => {
+    const delay = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
+
+    async function capturedSignal(timeoutMs: number): Promise<AbortSignal> {
+      let seen!: AbortSignal;
+      const executor = (async (_input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+        seen = init!.signal as AbortSignal;
+        // Stay open long enough that a positive budget would elapse mid-flight.
+        await delay(40);
+        return new Response("ok");
+      }) as typeof fetch;
+      await fetchWithHeaderTimeout("https://local.test/v1/responses", { method: "POST" }, new AbortController().signal, timeoutMs, false, executor);
+      return seen;
+    }
+
+    test.each([0, -1])("budget %s never aborts the composed signal on its own", async timeoutMs => {
+      const signal = await capturedSignal(timeoutMs);
+      await delay(30);
+      expect(signal.aborted).toBe(false);
+    });
+
+    test("a positive budget still arms the header clock", async () => {
+      let seen!: AbortSignal;
+      const executor = (async (_input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+        seen = init!.signal as AbortSignal;
+        await delay(40);
+        return new Response("ok");
+      }) as typeof fetch;
+      await fetchWithHeaderTimeout("https://public.test/v1/responses", { method: "POST" }, new AbortController().signal, 5, false, executor).catch(() => {});
+      await delay(30);
+      expect(seen.aborted).toBe(true);
+    });
   });
   test.each([false, true])("notification failure releases the slot (pre-acquired=%s)", async preAcquired => {
     let releases = 0, sends = 0;

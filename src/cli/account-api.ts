@@ -17,13 +17,15 @@ import { projectAccountHealth } from "./account-next-actions";
 import type { OAuthHealthLabel } from "../oauth/health";
 
 import { accountPauseDetailsSchema } from "../config/schema/account-auto-pause";
-import { projectChatgptSubscription, type ChatgptSubscription } from "../codex/plan";
 export type AccountType = "codex" | "oauth" | "api-key";
 
 export interface AccountRow {
   provider: string;
   type: AccountType;
   id: string;
+  slotId?: string;
+  slotKind?: "native-main" | "pool";
+  upstreamAccountKey?: string;
   label?: string;
   email?: string;
   /**
@@ -31,7 +33,6 @@ export interface AccountRow {
    * an absent key means the row's surface does not carry a tier at all (#3777).
    */
   plan?: string | null;
-  subscription?: ChatgptSubscription;
   masked?: string;
   active: boolean;
   needsReauth?: boolean;
@@ -308,15 +309,21 @@ export interface CodexQuotaDto {
 
 export interface ProviderQuotaWindowDto {
   label: string;
+  displayLabel?: string;
   percent: number;
   resetAt?: number;
   modelId?: string;
+  /** Share of the weekly limit a model family may use, when upstream reports it. */
+  weeklyAllowancePercent?: number;
 }
 
 export interface ProviderQuotaDto extends CodexQuotaDto {
   fiveHourPercent?: number;
   fiveHourResetAt?: number;
   customWindows?: ProviderQuotaWindowDto[];
+  /** Readings upstream reports as not in effect; shown, never routed on. */
+  displayWindows?: ProviderQuotaWindowDto[];
+  unknownBudgetWindows?: { label: string; resetAt?: number }[];
   updatedAt?: number;
 }
 
@@ -331,10 +338,12 @@ export interface ProviderQuotaReportDto {
 
 interface CodexAccountDto {
   id: string;
+  slotId?: string;
+  slotKind?: "native-main" | "pool";
+  upstreamAccountKey?: string;
   alias?: string;
   email?: string;
   plan?: string;
-  subscription?: unknown;
   isMain?: boolean;
   needsReauth?: boolean;
   selectionExcludedReason?: "plan_excluded";
@@ -404,10 +413,14 @@ export async function fetchCodexRows(
     provider: "openai",
     type: "codex" as const,
     id: a.id,
+    slotId: a.id,
+    slotKind: a.id === "__main__" ? "native-main" as const : "pool" as const,
+    ...(a.slotId === a.id && typeof a.upstreamAccountKey === "string"
+      && /^uai1_[0-9a-f]{64}$/.test(a.upstreamAccountKey)
+      ? { upstreamAccountKey: a.upstreamAccountKey } : {}),
     label: a.alias ?? a.plan ?? a.email,
     email: a.email,
     plan: a.plan,
-    subscription: projectChatgptSubscription(a.subscription),
     active: a.id === activeId,
     needsReauth: a.needsReauth,
     ...projectAccountHealth(a, "openai", a.id),

@@ -21,7 +21,7 @@ Responses WebSocket terminal frames normalize known `incomplete_details.reason` 
 
 ## Heartbeat and stall deadline
 
-RunTurn search interception forwards adapter heartbeats immediately and emits progress for buffered semantic events. Its bridge uses the search plan's stall deadline so a bounded sidecar search fits the watchdog budget.
+Header and JSON policy follow [local deadlines](timeouts.md). Responses and direct-client watchdogs read live serving locality across refreshed continuation legs and reset silence ticks on locality changes. RunTurn search interception forwards adapter heartbeats immediately and emits progress for buffered semantic events. Its bridge uses the search plan's stall deadline so a bounded sidecar search fits the watchdog budget.
 
 Native Chat uses the same resolved `stallTimeoutSec` with a pending-upstream-read allowance that
 pauses under downstream backpressure. Its Chat error and cancellation contract is documented in
@@ -57,7 +57,7 @@ cancellation decisions.
 
 > Decision record: [ADR-5805](../decisions/ADR-5805-chat-completions-heartbeat-relay.md)
 
-Top-level `emptyCompletionRetry: true` opts Responses turns into one identical replay when an
+Top-level `emptyCompletionRetry: true` opts translated Responses turns into one identical replay when an
 upstream turn produces neither output text nor a tool call, including a stream that ends before a
 terminal event. A terminal-less stream is replayed only before actionable output; post-output EOF
 remains incomplete so text or tool calls cannot be duplicated. The default is off because the replay
@@ -66,7 +66,7 @@ buffered HTTP adapters plus `runTurn` transports share the same guard, while com
 routed compaction stay excluded. Pre-content reasoning is retained under named event-count and byte
 caps and emits liveness heartbeats while held. A second empty result or retry failure becomes typed
 502 `empty_completion_retry_failed`; usage is merged across sends, and the Logs attempt records
-recovery kind `empty-completion`.
+recovery kind `empty-completion`. Native OpenGateway passthrough follows its [separate completion contract](../providers/opengateway.md), with destination-specific default recovery and terminal-only replay.
 
 The fetch and runTurn web-search loops honor `streamRoutedModelOutput`: leading text and reasoning
 stream live until the first tool boundary, and final replay omits already delivered events.
@@ -125,11 +125,11 @@ A body timeout publishes a typed read failure and cancels only that body's reade
 it does not abort the request-wide signal before the enclosing bridge can emit
 its failure terminal. A caught body failure is classified before signal state, so a
 source cancellation that synchronously aborts the shared signal still reports the
-stall. Buffered initial timeouts return HTTP 504; continuation
-timeouts become an in-stream error with status 504, while caller cancellation
-retains status 499. Normal completion does not abort a shared request.
+stall. Buffered initial and locally marked continuation timeouts return HTTP 504; streamed initial,
+recovery and continuation timeouts emit `upstream_stall_timeout` and retain 504 terminal classification.
+Provider-supplied codes cannot mint the local marker; caller cancellation retains 499. Normal completion does not abort a shared request.
 
-Regression coverage lives in `tests/lib/abort-idle-deadline.test.ts`.
+Regression coverage lives in `tests/lib/abort-idle-deadline.test.ts` and `tests/server/terminal-guard-server.test.ts`.
 
 ### Pre-stream provider input overflow
 
@@ -246,7 +246,7 @@ returns the same downstream SSE contract. The canonical `openai` provider uses
 upstream WebSocket by default; `providers.openai.upstreamWebsocket: false` sends
 its streaming turns over HTTP/SSE instead. This explicit choice also makes
 native mid-turn steering and injection unavailable on that provider. It does
-not change the endpoint, credential, or downstream event format.
+not change the endpoint, credential, or downstream event format. The [upstream connection-signal contract](responses-wire-shapes.md#passthrough-sse-stream-shapes-314) preserves an actual reasoning-inclusion header for HTTP/SSE clients; it cannot modify a client-facing WebSocket upgrade that already completed.
 Its WSS route checks NO_PROXY first, then selects the
 first non-empty HTTPS_PROXY, https_proxy, ALL_PROXY, or all_proxy value. HTTP_PROXY alone does not
 route WSS. Unsupported or malformed selected proxy values skip the WebSocket attempt and use the
@@ -358,13 +358,13 @@ Pool quota producers and account commands follow the [bounded raw-observation co
 
 Account quota surfaces use [safe probe diagnostics](inventory.md#account-quota-failure-diagnostics) separately from quota validity, credential health and routing authority.
 
-Combo child requests normalize effort and thinking controls against the selected target while retaining reasoning summaries; strict unknown targets preserve caller controls. The [Responses transport owner](responses.md) documents this boundary, and native Chat capability stripping applies only for an explicit empty declaration or no-reasoning model; an initial JEV null choice separately strips caller effort.
+Combo child requests normalize effort and thinking controls against the selected target while retaining reasoning summaries; strict unknown targets preserve caller controls. The [Responses transport owner](responses.md) documents this boundary, and native Chat also honors explicit per-axis capability declarations; in the default `decide` mode an initial JEV null choice separately strips caller effort.
 
 Live sideband admission and its bounded upstream handshake follow the [runtime contract](../runtime.md#live-sideband-handshake); the ordinary Responses WebSocket exchange remains separate.
 
 ## Translated Chat inline-image budget
 
-`src/adapters/openai-chat-images.ts` reuses the shared image normalization ladder for translated Chat bodies above a 3.5 MiB base64-image budget. This is best effort, not a whole-request ceiling. Remote URLs are not fetched; unprocessable and terminal images remain attached, and retained bytes continue to count during demotion. Under-budget construction stays synchronous; delegating MiMo awaits conditional asynchronous construction. Native decoding is admitted through a process-wide four-operation gate, guarded by a 16-million-pixel ceiling confirmed from codec metadata, and request cancellation stops queued and subsequent normalization work. Native Chat passthrough and Anthropic-only 413 retry policy retain their existing behavior.
+`src/adapters/openai-chat-images.ts` reuses the shared image normalization ladder for translated Chat bodies above a 3.5 MiB base64-image budget. This is best effort, not a whole-request ceiling. Remote URLs are not fetched; unprocessable and terminal images remain attached, and retained bytes continue to count during demotion. Under-budget construction stays synchronous; delegating MiMo awaits conditional asynchronous construction. Native decoding is admitted through a process-wide four-operation gate, guarded by a 16-million-pixel ceiling confirmed from codec metadata, and request cancellation stops queued and subsequent normalization work. Native Chat passthrough and Anthropic-only 413 retry policy retain their existing behavior. A provider whose registry row declares `minImageEdge` (Venice: 64) then has every decodable inline image whose short edge is below it upscaled to that edge, keeping the aspect ratio unless the long edge would pass 4096, where it is capped (extreme strips are then stretched); this runs after budget normalization because the 320px terminal tier can floor a wide screenshot under the minimum, and an image that fails to decode keeps its original URL.
 
 The [explicit model-capability contract](../config.md#explicit-per-model-capability-declarations) preserves operator declarations through provider storage and catalog capture; it does not infer upstream capability or change this surface's routing behavior.
 
@@ -397,8 +397,8 @@ accompany results, but privileged messages, unrelated IDs and duplicate results 
 implementation pins routing, models and tools; validated generation overrides follow the
 [continuation-setting contract](#steering-settings-public-api-and-diagnostic-probe). A failed steer does not
 cancel an explicit continuation already dispatched. Explicit continuations
-are paced and recheck the captured dispatch guard after waiting. No tools, accepted input
-or ambiguously delivered sends are automatically replayed.
+are paced, recheck the captured dispatch guard and follow the [workflow physical-send ceiling](responses-spend.md#workflow-physical-send-ceiling) under the existing turn lease.
+No tools, accepted input or ambiguously delivered sends are automatically replayed; a known local budget refusal is not an upstream failure.
 
 `src/server/responses/native-steering-replay.ts` journals only committed native input into
 the existing thread-scoped replay cache. Rejected/uncommitted steer text is excluded. Sparse
@@ -463,7 +463,7 @@ unreturned advertised calls retain the socket. Late tool results still reach tha
 socket. A `response_already_completed` failure is relayed unchanged, including its
 returned input; only an explicit same-parent/lane/settings client create can supply
 those saved outputs once. The existing continuation pacing and captured dispatch
-guard run again. The proxy never reruns tools, invents acceptance, switches accounts
+guard and [physical-send admission](responses-spend.md#workflow-physical-send-ceiling) run again. The proxy never reruns tools, invents acceptance, switches accounts
 or automatically creates a recovery response. Unknown delivery terminates without
 HTTP fallback or replay. The client decides how to recover other failures.
 
@@ -550,9 +550,9 @@ charged against the unchanged 32 MiB serialized history budget. The existing
 body-persistence eligibility and accepted-only steering commit rules still apply.
 `tests/responses/ws-steering-stability.test.ts` binds these deadline and replay
 contracts to deterministic clocks and a synthetic real-handler continuation test.
-`src/server/responses/native-response-json.ts` owns content comparison without
-importing either control owner, keeping the replay dependency graph acyclic.
-Injection retains its existing helper export names and comparison semantics.
+`src/server/responses/native-response-json.ts` owns content comparison and
+[bounded output identity](inventory.md#native-output-identity) without importing either control owner.
+Injection retains its existing helper export names and SHA-256 comparison semantics.
 
 ## Steering settings, public API and diagnostic probe
 

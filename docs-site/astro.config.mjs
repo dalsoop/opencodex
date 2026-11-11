@@ -27,15 +27,17 @@ export default defineConfig({
         "Universal provider proxy for OpenAI Codex & Claude Code — use any LLM with Codex CLI, App, SDK, and Claude Code.",
       tagline: "Use any LLM with OpenAI Codex and Claude Code.",
       logo: {
-        light: "./src/assets/logo-light.png",
-        dark: "./src/assets/logo-dark.png",
+        light: "./src/assets/logo-light.svg",
+        dark: "./src/assets/logo-dark.svg",
         replacesTitle: false,
       },
       favicon: "/favicon.ico",
       customCss: [
         "@fontsource-variable/geist",
-        "pretendard/dist/web/variable/pretendardvariable-dynamic-subset.css",
+        "@fontsource-variable/geist-mono",
+        "wanted-sans/fonts/webfonts/variable/split/WantedSansVariable.css",
         "./src/styles/custom.css",
+        "./src/styles/site-theme.css",
       ],
       components: {
         Header: "./src/components/Header.astro",
@@ -44,6 +46,10 @@ export default defineConfig({
       head: [
         // Google favicon guidelines: PNG at a multiple of 48px, exposed via rel="icon".
         { tag: "link", attrs: { rel: "icon", type: "image/png", sizes: "192x192", href: "/favicon.png" } },
+        // The vector mark recolours itself for dark browser chrome; browsers that
+        // understand SVG icons prefer it over the generated ICO/PNG (scripts/brand-favicons.ts).
+        { tag: "link", attrs: { rel: "icon", type: "image/svg+xml", href: "/favicon.svg" } },
+        { tag: "link", attrs: { rel: "apple-touch-icon", href: "/favicon.png" } },
         { tag: "meta", attrs: { property: "og:image", content: `${SITE_URL}/og.png` } },
         { tag: "meta", attrs: { property: "og:image:width", content: "1200" } },
         { tag: "meta", attrs: { property: "og:image:height", content: "630" } },
@@ -92,6 +98,7 @@ export default defineConfig({
             { label: "Remote Workspace", translations: { fr: "Espace de travail distant", ko: "원격 워크스페이스", "zh-CN": "远程工作区", "zh-TW": "遠端工作區", ru: "Удалённая рабочая область", ja: "リモートワークスペース", tr: "Uzak Çalışma Alanı" }, slug: "guides/remote-workspace" },
             { label: "Providers", translations: { fr: "Fournisseurs", ko: "프로바이더", "zh-CN": "提供商", "zh-TW": "供應商", ru: "Провайдеры", ja: "プロバイダー", tr: "Sağlayıcılar" }, slug: "guides/providers" },
             { label: "Factory Droid Bridge", translations: { fr: "Pont Factory Droid", ko: "Factory Droid 브리지", "zh-CN": "Factory Droid 桥接", "zh-TW": "Factory Droid 橋接", ru: "Мост Factory Droid", ja: "Factory Droid ブリッジ", tr: "Factory Droid köprüsü" }, slug: "guides/factory-droid" },
+            { label: "Ollama-Compatible Clients", translations: { fr: "Clients compatibles Ollama", ko: "Ollama 호환 클라이언트", "zh-CN": "Ollama 兼容客户端", "zh-TW": "Ollama 相容用戶端", ru: "Клиенты, совместимые с Ollama", ja: "Ollama 互換クライアント", tr: "Ollama uyumlu istemciler" }, slug: "guides/ollama-clients" },
             { label: "Cursor Private Inference", translations: { ko: "Cursor Private Inference", fr: "Cursor Private Inference", "zh-CN": "Cursor Private Inference", "zh-TW": "Cursor Private Inference", ru: "Cursor Private Inference", ja: "Cursor Private Inference", tr: "Cursor Private Inference" }, slug: "guides/cursor-private-inference" },
             { label: "Model Routing", translations: { fr: "Routage des modèles", ko: "모델 라우팅", "zh-CN": "模型路由", "zh-TW": "模型路由", ru: "Маршрутизация моделей", ja: "モデルルーティング", tr: "Model Yönlendirme" }, slug: "guides/model-routing" },
             { label: "Codex Integration", translations: { fr: "Intégration de Codex", ko: "Codex 통합", "zh-CN": "Codex 集成", "zh-TW": "Codex 整合", ru: "Интеграция с Codex", ja: "Codex 連携", tr: "Codex Entegrasyonu" }, slug: "guides/codex-integration" },
@@ -103,6 +110,7 @@ export default defineConfig({
             { label: "Desktop App", translations: { fr: "Application de bureau", ko: "데스크톱 앱", "zh-CN": "桌面应用", "zh-TW": "桌面 App", ru: "Настольное приложение", ja: "デスクトップアプリ", tr: "Masaüstü Uygulaması" }, slug: "guides/desktop-app" },
             { label: "Model Ordering", translations: { fr: "Ordre des modèles", ko: "모델 정렬에 관하여", "zh-CN": "模型排序", "zh-TW": "模型排序", ru: "Сортировка моделей", ja: "モデルの並び順", tr: "Model Sıralaması" }, slug: "guides/model-ordering" },
             { label: "Combos", translations: { fr: "Combinaisons", ko: "콤보", "zh-CN": "组合", "zh-TW": "組合", ru: "Комбо", ja: "コンボ", tr: "Kombolar" }, slug: "guides/combos" },
+            { label: "Fallback off", translations: { fr: "Désactiver le repli", ko: "폴백 끄기", "zh-CN": "关闭回退", "zh-TW": "關閉備援", ru: "Отключение резерва", ja: "フォールバックをオフにする", tr: "Yedeği kapatma" }, slug: "guides/fallback-off" },
             { label: "Protocol Paths", translations: { fr: "Chemins de protocole", ko: "프로토콜 경로", "zh-CN": "协议路径", "zh-TW": "協定路徑", ru: "Пути протоколов", ja: "プロトコル経路", tr: "Protokol Yolları" }, slug: "guides/protocol-paths" },
             { label: "Claude Code", translations: { fr: "Claude Code", ko: "Claude Code", "zh-CN": "Claude Code", "zh-TW": "Claude Code", ru: "Claude Code", ja: "Claude Code", tr: "Claude Code" }, slug: "guides/claude-code" },
             { label: "Grok Build", translations: { fr: "Grok Build", ko: "Grok Build", "zh-CN": "Grok Build", "zh-TW": "Grok Build", ru: "Grok Build", ja: "Grok Build", tr: "Grok Build" }, slug: "guides/grok-build" },
@@ -116,6 +124,7 @@ export default defineConfig({
             { label: "Image Bridge", translations: { fr: "Pont d’images", ko: "이미지 브릿지", "zh-CN": "图像桥接", "zh-TW": "圖像橋接", ru: "Image Bridge", ja: "画像ブリッジ", tr: "Image Bridge" }, slug: "guides/image-bridge" },
             { label: "Video Bridge", translations: { fr: "Pont vidéo", ko: "비디오 브릿지", "zh-CN": "视频桥接", "zh-TW": "影片橋接", ru: "Video Bridge", ja: "動画ブリッジ", tr: "Video Bridge" }, slug: "guides/video-bridge" },
             { label: "Web Dashboard", translations: { fr: "Tableau de bord web", ko: "웹 대시보드", "zh-CN": "网页控制台", "zh-TW": "網頁儀表板", ru: "Веб-дашборд", ja: "ウェブダッシュボード", tr: "Web Kontrol Paneli" }, slug: "guides/web-dashboard" },
+            { label: "Telemetry & Privacy", translations: { fr: "Télémétrie et confidentialité", ko: "텔레메트리 및 개인정보", "zh-CN": "遥测与隐私", "zh-TW": "遙測與隱私", ru: "Телеметрия и конфиденциальность", ja: "テレメトリとプライバシー", tr: "Telemetri ve Gizlilik" }, slug: "guides/telemetry" },
             { label: "Sub-agent Surface", translations: { fr: "Interface des sous-agents", ko: "서브에이전트 서피스", "zh-CN": "子代理界面", "zh-TW": "子代理介面", ru: "Интерфейс подагентов", ja: "サブエージェントサーフェス", tr: "Alt Ajan Arayüzü" }, slug: "guides/sub-agent-surface" },
             { label: "Why v1 Is the Default", translations: { fr: "Pourquoi v1 est la valeur par défaut", ko: "v1이 기본값인 이유", "zh-CN": "为什么默认是 v1", "zh-TW": "為什麼預設是 v1", ru: "Почему v1 по умолчанию", ja: "v1 がデフォルトである理由", tr: "Neden varsayılan v1" }, slug: "guides/subagent-v1-default" },
           ],
@@ -153,12 +162,14 @@ export default defineConfig({
               items: [
                 { label: "Overview", translations: { fr: "Vue d’ensemble", ko: "개요", "zh-CN": "概览", "zh-TW": "概覽", ru: "Обзор", ja: "概要", tr: "Genel Bakış" }, slug: "reference/configuration" },
                 { label: "Providers", translations: { fr: "Fournisseurs", ko: "프로바이더", "zh-CN": "提供商", "zh-TW": "供應商", ru: "Провайдеры", ja: "プロバイダー", tr: "Sağlayıcılar" }, slug: "reference/configuration/providers" },
+                { label: "Catalog", translations: { fr: "Catalogue", ko: "카탈로그", "zh-CN": "目录", "zh-TW": "目錄", ru: "Каталог", ja: "カタログ", tr: "Katalog" }, slug: "reference/configuration/catalog" },
                 { label: "Routing", translations: { fr: "Routage", ko: "라우팅", "zh-CN": "路由", "zh-TW": "路由", ru: "Маршрутизация", ja: "ルーティング", tr: "Yönlendirme" }, slug: "reference/configuration/routing" },
                 { label: "Agents", translations: { fr: "Agents", ko: "에이전트", "zh-CN": "代理", "zh-TW": "代理", ru: "Агенты", ja: "エージェント", tr: "Ajanlar" }, slug: "reference/configuration/agents" },
                 { label: "Advisor", translations: { fr: "Conseiller", ko: "어드바이저", "zh-CN": "顾问", "zh-TW": "顧問", ru: "Консультант", ja: "アドバイザー", tr: "Danışman" }, slug: "reference/configuration/advisor" },
                 { label: "Server & Runtime", translations: { fr: "Serveur et environnement d’exécution", ko: "서버 & 런타임", "zh-CN": "服务器与运行时", "zh-TW": "伺服器與執行階段", ru: "Сервер и рантайм", ja: "サーバー & ランタイム", tr: "Sunucu ve Çalışma Zamanı" }, slug: "reference/configuration/server" },
               ],
             },
+            { label: "Client Support", translations: { fr: "Clients pris en charge", ko: "클라이언트 지원", "zh-CN": "客户端支持", "zh-TW": "用戶端支援", ru: "Поддержка клиентов", ja: "クライアント対応", tr: "İstemci desteği" }, slug: "reference/client-support" },
             { label: "Adapters", translations: { fr: "Adaptateurs", ko: "어댑터", "zh-CN": "适配器", "zh-TW": "適配器", ru: "Адаптеры", ja: "アダプター", tr: "Adaptörler" }, slug: "reference/adapters" },
             { label: "Architecture", translations: { fr: "Architecture", ko: "아키텍처", "zh-CN": "架构", "zh-TW": "架構", ru: "Архитектура", ja: "アーキテクチャ", tr: "Mimari" }, slug: "reference/architecture" },
             { label: "Platform Support", translations: { fr: "Prise en charge des plateformes", ko: "플랫폼 지원", "zh-CN": "平台支持", "zh-TW": "平台支援", ru: "Поддержка платформ", ja: "プラットフォーム対応", tr: "Platform Desteği" }, link: `${SITE_URL}/reference/platform-support` },

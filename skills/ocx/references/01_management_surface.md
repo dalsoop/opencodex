@@ -25,13 +25,13 @@ These answer in the CLI head and never reach the proxy, so they work with nothin
 
 | Chapter | Declared capabilities |
 |---|---|
-| [lifecycle](01_surface_lifecycle.md) | 13 |
-| [providers-models](01_surface_providers-models.md) | 49 |
-| [accounts](01_surface_accounts.md) | 42 |
-| [agents-routing](01_surface_agents-routing.md) | 62 |
+| [lifecycle](01_surface_lifecycle.md) | 14 |
+| [providers-models](01_surface_providers-models.md) | 50 |
+| [accounts](01_surface_accounts.md) | 43 |
+| [agents-routing](01_surface_agents-routing.md) | 68 |
 | [integrations](01_surface_integrations.md) | 41 |
-| [observe-system](01_surface_observe-system.md) | 96 |
-| [access-remote](01_surface_access-remote.md) | 32 |
+| [observe-system](01_surface_observe-system.md) | 105 |
+| [access-remote](01_surface_access-remote.md) | 35 |
 | [lab](01_surface_lab.md) | 21 |
 
 ## Read-only capabilities
@@ -83,6 +83,10 @@ Original invocation order. These headings preserve links to the previous single-
 
 [State-changing task](01_surface_access-remote.md#ocx-link-reconnect)
 
+### `ocx link cleanup`
+
+[Read-oriented task](01_surface_access-remote.md#ocx-link-cleanup)
+
 ### `ocx remote-workspace pair`
 
 [State-changing task](01_surface_access-remote.md#ocx-remote-workspace-pair)
@@ -122,6 +126,10 @@ Original invocation order. These headings preserve links to the previous single-
 ### `ocx connect rotate`
 
 [State-changing task](01_surface_access-remote.md#ocx-connect-rotate)
+
+### `ocx update`
+
+[State-changing task](01_surface_observe-system.md#ocx-update)
 
 ### `ocx capabilities`
 
@@ -275,6 +283,14 @@ Original invocation order. These headings preserve links to the previous single-
 
 [Read-oriented task](01_surface_observe-system.md#ocx-system-codex-cli-update-plan)
 
+### `ocx system codex-cli-update apply`
+
+[State-changing task](01_surface_observe-system.md#ocx-system-codex-cli-update-apply)
+
+### `ocx system codex-cli-update status`
+
+[Read-oriented task](01_surface_observe-system.md#ocx-system-codex-cli-update-status)
+
 ### `ocx system codex-restart`
 
 [State-changing task](01_surface_observe-system.md#ocx-system-codex-restart)
@@ -402,6 +418,10 @@ Original invocation order. These headings preserve links to the previous single-
 ### `ocx provider selected`
 
 [State-changing task](01_surface_providers-models.md#ocx-provider-selected)
+
+### `ocx provider import-cc-switch`
+
+[State-changing task](01_surface_providers-models.md#ocx-provider-import-cc-switch)
 
 ### `ocx models list`
 
@@ -535,6 +555,10 @@ Original invocation order. These headings preserve links to the previous single-
 
 [State-changing task](01_surface_providers-models.md#ocx-models-order-reset)
 
+### `ocx account reset-affinity`
+
+[State-changing task](01_surface_accounts.md#ocx-account-reset-affinity)
+
 ### `ocx account preserve-signed-in`
 
 [State-changing task](01_surface_accounts.md#ocx-account-preserve-signed-in)
@@ -655,6 +679,10 @@ Original invocation order. These headings preserve links to the previous single-
 
 [State-changing task](01_surface_agents-routing.md#ocx-message-send)
 
+### `ocx message mcp`
+
+[State-changing task](01_surface_agents-routing.md#ocx-message-mcp)
+
 ### `ocx advisor`
 
 [State-changing task](01_surface_agents-routing.md#ocx-advisor)
@@ -750,6 +778,26 @@ Original invocation order. These headings preserve links to the previous single-
 ### `ocx agent sidecar vision`
 
 [State-changing task](01_surface_agents-routing.md#ocx-agent-sidecar-vision)
+
+### `ocx fallback`
+
+[Read-oriented task](01_surface_agents-routing.md#ocx-fallback)
+
+### `ocx fallback off`
+
+[State-changing task](01_surface_agents-routing.md#ocx-fallback-off)
+
+### `ocx fallback on`
+
+[State-changing task](01_surface_agents-routing.md#ocx-fallback-on)
+
+### `ocx fallback clear`
+
+[State-changing task](01_surface_agents-routing.md#ocx-fallback-clear)
+
+### `ocx fallback local`
+
+[State-changing task](01_surface_agents-routing.md#ocx-fallback-local)
 
 ### `ocx effort`
 
@@ -974,6 +1022,10 @@ Original invocation order. These headings preserve links to the previous single-
 ### `ocx integration native cursor local-installer`
 
 [Read-oriented task](01_surface_integrations.md#ocx-integration-native-cursor-local-installer)
+
+### `ocx stop`
+
+[State-changing task](01_surface_lifecycle.md#ocx-stop)
 
 ### `ocx logs filter`
 
@@ -1319,6 +1371,34 @@ Original invocation order. These headings preserve links to the previous single-
 
 [Read-oriented task](01_surface_observe-system.md#ocx-companion-timeline)
 
+### `ocx telemetry status`
+
+[Read-oriented task](01_surface_observe-system.md#ocx-telemetry-status)
+
+### `ocx telemetry enable`
+
+[State-changing task](01_surface_observe-system.md#ocx-telemetry-enable)
+
+### `ocx telemetry disable`
+
+[State-changing task](01_surface_observe-system.md#ocx-telemetry-disable)
+
+### `ocx telemetry profile status`
+
+[Read-oriented task](01_surface_observe-system.md#ocx-telemetry-profile-status)
+
+### `ocx telemetry profile connect`
+
+[State-changing task](01_surface_observe-system.md#ocx-telemetry-profile-connect)
+
+### `ocx telemetry profile disconnect`
+
+[State-changing task](01_surface_observe-system.md#ocx-telemetry-profile-disconnect)
+
+### `ocx disconnect`
+
+[State-changing task](01_surface_access-remote.md#ocx-disconnect)
+
 ### `ocx hub disable`
 
 [State-changing task](01_surface_access-remote.md#ocx-hub-disable)
@@ -1386,6 +1466,10 @@ Original invocation order. These headings preserve links to the previous single-
 ### `ocx access audio live-check`
 
 [State-changing task](01_surface_access-remote.md#ocx-access-audio-live-check)
+
+### `ocx link check`
+
+[State-changing task](01_surface_access-remote.md#ocx-link-check)
 
 ### `ocx lab status`
 
@@ -1473,6 +1557,6 @@ Original invocation order. These headings preserve links to the previous single-
 
 ## Counts
 
-- declared capabilities: 356
-- of those, state-changing: 217
+- declared capabilities: 377
+- of those, state-changing: 233
 - head-resolved invocations: 2

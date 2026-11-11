@@ -15,7 +15,7 @@ exécute des fonctionnalités d'assistance autour des demandes du fournisseur.
 | `proxy?` | `string` | — | URL du proxy HTTP(S) ou SOCKS5 sortant (`socks5://host:port`) ou `${ENV_VAR}`. Les URL HTTP s’appliquent à `HTTP_PROXY` / `HTTPS_PROXY` si elles sont vides. Les URL SOCKS5 utilisent le tunnel SOCKS5 intégré et sont aussi exposées via `ALL_PROXY` (`ocx start --socks5`); `HTTP(S)_PROXY` héritées sont effacées dans ce processus. Le bouclage reste dans `NO_PROXY`. |
 | `emptyCompletionRetry?` | `boolean` | `false` | Active une nouvelle tentative Responses identique lorsqu’une réponse ne contient ni texte ni appel d’outil. Cette tentative peut être facturée. `OCX_EMPTY_COMPLETION_RETRY=0` la désactive sans modifier la configuration ; les combinaisons et les tours de compactage routés restent exclus. |
 | `stallTimeoutSec?` | `number` | `300` (public) / désactivé (local) | Secondes sans progression utile en amont (Responses et Chat natif) avant la coupure du flux. Sans réglage, un amont **local** (loopback, privé ou nom `.local`/`.lan`) est désactivé par défaut et un amont public vaut 300 s ; une valeur positive s'applique aux deux (minimum 1 s) ; `0` désactive partout le watchdog de silence. Pour Responses qui replie le SSE canonique ChatGPT en JSON non-streaming, un plafond total indépendant de 15 minutes subsiste même lorsque ce watchdog est désactivé. Les lectures de corps en attente de `/v1/responses/compact` partagent ce budget mais valent 300 s par défaut même pour un amont local ; une valeur explicite, y compris `0`, prime. |
-| `connectTimeoutMs?` | `number` | `200000` | Délai maximal par tentative pour DNS/TCP/TLS et les en-têtes finaux ; il prend fin avant la génération du corps. |
+| `connectTimeoutMs?` | `number` | `200000` (public) / désactivé (local) | Délai par tentative entre l'envoi de la requête et le premier en-tête de réponse de l'amont (DNS/TCP/TLS et attente des en-têtes) ; il prend fin avant la génération du corps et est indépendant de `stallTimeoutSec`, qui régit le flux du corps. Sans réglage, un amont **local** (loopback, privé ou nom `.local`/`.lan`) est désactivé par défaut et un amont public vaut 200 s ; une valeur positive s'applique aux deux ; `0` (ou toute valeur non positive) désactive partout ce délai d'en-tête. La désactivation permet à un modèle local de passer plusieurs minutes en prompt prefill sur une requête volumineuse sans que l'horloge du premier en-tête ne coupe une requête saine. |
 | `shutdownTimeoutMs?` | `number` | `5000` | Délai de vidange gracieux avant l’annulation des tours actifs. |
 | `websockets?` | `boolean` | `false` | Annonce et autorise la route WebSocket Responses destinée aux clients. La valeur false maintient les clients sur HTTP/SSE ; elle ne désactive pas une optimisation WebSocket canonique admissible vers ChatGPT en amont. |
 | `corsAllowOrigins?` | `string[]` | `[]` | Origines exactes supplémentaires autorisées par CORS. Les origines de bouclage sont toujours autorisées. Les origines d'extensions de navigateur basées sur l'autorité telles que `chrome-extension://<extension-id>` sont prises en charge ; `*` n'est pas un caractère générique. Firefox et Safari régénèrent l'extension UUID (par installation / par lancement de navigateur), mettez donc à jour l'entrée lorsque l'origine change. |
@@ -31,6 +31,7 @@ exécute des fonctionnalités d'assistance autour des demandes du fournisseur.
 | `webSearchSidecar?` | `OcxWebSearchSidecarConfig` | activé lorsqu'il est utilisable | Options du service auxiliaire de recherche Web. |
 | `visionSidecar?` | `OcxVisionSidecarConfig` | activé lorsqu'il est utilisable | Options du service auxiliaire de description d'images. |
 | `images?` | `OcxImagesConfig` | sélection automatique OpenAI | Options de relais d'images autonomes pour Codex `image_gen`. |
+| `telemetry?` | `OcxTelemetryConfig` | activé par défaut après information d'un humain | État du consentement à la télémétrie quotidienne anonyme (`decision`, `decidedAt`, `noticeShownAt`). Rien n'est envoyé tant qu'une personne n'a pas vu l'avis ou donné son accord. Remplacé par `OCX_TELEMETRY=0` ou `DO_NOT_TRACK=1`. Voir [Télémétrie (`telemetry`)](#télémétrie-telemetry) et [Télémétrie et confidentialité](/fr/guides/telemetry/). |
 
 Si une ancienne version de développement a modifié les métadonnées de l'historique de reprise avant que la prise en charge de la sauvegarde n'existe, exécutez
 `ocx recover-history --legacy-openai --yes` pour forcer la récupération du fournisseur natif.
@@ -154,6 +155,35 @@ La commande `ssh -L` simple écoute sur votre interface de bouclage locale et co
 `ssh -g -L`, une publication de conteneur trop large ou des modes de redirection qui exposent le côté client sur
 `0.0.0.0`. Liez explicitement avec `ssh -L 127.0.0.1:20100:localhost:10100` en cas de doute.
 :::
+
+## Télémétrie (`telemetry`)
+
+La télémétrie d'utilisation quotidienne anonyme n'est activée par défaut qu'après qu'une personne a vu l'avis d'information (dans la fenêtre du tableau de bord ou une invite de terminal interactif). Le bloc `telemetry` dans `config.json` enregistre cet état de consentement :
+
+```json
+{
+  "telemetry": {
+    "decision": "accepted",
+    "decidedAt": "2026-11-07T09:00:00.000Z",
+    "noticeShownAt": "2026-11-07T09:00:00.000Z"
+  }
+}
+```
+
+| Champ | Type | Par défaut | Signification |
+| --- | --- | --- | --- |
+| `telemetry.decision?` | `"accepted" \| "declined"` | non défini (indécis) | Choix explicite de l'utilisateur. `"declined"` désactive la télémétrie et supprime `<OPENCODEX_HOME>/telemetry-id.json` ; `"accepted"` active les rapports quotidiens. |
+| `telemetry.decidedAt?` | `string` (ISO 8601) | non défini | Horodatage UTC de l'enregistrement de `decision`. Seuls les jours calendaires UTC complets strictement postérieurs au jour UTC de `decidedAt ?? noticeShownAt` (`day > formatUtcDay(decidedAt ?? noticeShownAt)`) sont envoyés ; le jour du consentement et les jours antérieurs ne sont jamais envoyés rétroactivement. |
+| `telemetry.noticeShownAt?` | `string` (ISO 8601) | non défini | Horodatage UTC auquel un humain a vu l'avis dans le tableau de bord web ou un terminal interactif. Lorsque `decision` n'est pas défini, la télémétrie n'envoie de rapport que si `noticeShownAt` est défini (`default-on`) ; sans lui, le proxy reste en `awaiting-notice`. |
+
+Le point de terminaison du collecteur (`https://telemetry.opencodex.me/v1/events`) est une constante du code et ne peut pas être configuré dans `config.json`.
+
+Deux variables d'environnement remplacent `config.json` et désactivent immédiatement la télémétrie sans modifier `config.json` (observer l'une d'elles au démarrage ou lors d'un cycle enregistre aussi `ineligibleThroughDay` dans `<OPENCODEX_HOME>/telemetry-state.json` et supprime `<OPENCODEX_HOME>/telemetry-id.json`, de sorte que ces jours ne sont jamais envoyés ultérieurement) :
+
+- `OCX_TELEMETRY=0` (accepte aussi `false`, `off` ou `no`, insensible à la casse)
+- `DO_NOT_TRACK=1` (accepte aussi `true` ou `yes`, insensible à la casse)
+
+`ocx config set telemetry` et `ocx config unset telemetry` sont refusés, et `ocx config import` ignore tout bloc `telemetry` importé pour tous les appelants en préservant l'état existant ; utilisez plutôt `ocx telemetry enable` (nécessite un terminal humain interactif avec invite de confirmation, sinon échoue avec `agent_consent_required` / `tty_required`), `ocx telemetry disable`, `ocx telemetry status [--json]` ou le commutateur **Détails du proxy** du tableau de bord. Voir [Télémétrie et confidentialité](/fr/guides/telemetry/) pour le schéma complet et la politique de conservation.
 
 ## Nettoyage du stockage
 
@@ -322,3 +352,11 @@ Le retour à 2.80.0 ne garantit ni l’agrégation canonique ni le même solde d
 Les journaux de versions expérimentales non publiées contenant `pool-current` ou `poolContinuity` sont exclus du contrat C, même après compactage. Leurs soldes d’origine restent un historique inconnu jusqu’à l’expiration normale, sans conversion ni suppression immédiate.
 
 Un enregistrement complet mais invalide, y compris un `null` final, bloque l’admission sous plafond. Le compactage peut conserver les données valides dans un point de contrôle propre, mais le refus reste actif jusqu’au redémarrage avec ce journal propre. Une dernière ligne JSON incomplète suit les règles de récupération existantes. Voir les limites et codes d’erreur dans la [référence anglaise](/reference/configuration/server/#historical-pool-continuity).
+
+## Classification des délais des upstreams locaux
+
+Cette classification règle les délais, pas les autorisations réseau. Sans requête DNS, les destinations HTTP(S) locales sont : `localhost` exact (casse indifférente, point final admis), `0.0.0.0`, loopback IPv4 (127/8), plages privées RFC 1918 et link-local (169.254/16), loopback IPv6, link-local (fe80::/10), unique-local (fc00::/7), équivalents IPv4-mapped et noms `.local`/`.lan`. Les autres noms DNS gardent les délais publics même s'ils résolvent vers loopback. Les destinations invalides, les schémas non pris en charge et `localhost.example` restent publics.
+
+Désactiver le délai d'en-tête préserve l'annulation client et toute échéance globale englobante. Un `stallTimeoutSec` explicitement positif borne le silence du corps local ; sans délais locaux header/stall configurés, aucune borne automatique ne précède les en-têtes. Le JSON local de Chat/Messages natif utilise le budget stall ; le JSON public conserve `max(connectTimeoutMs ?? 200000, 5000)`. Le corps compact conserve 300 secondes par défaut, même en local. Les budgets image/recherche restent inchangés.
+
+Le bloc facultatif `opencodeClientExport` accepte `headerTimeoutMs`, `chunkTimeoutMs` et `timeoutMs` : millisecondes positives ou `false` pour désactiver. Les valeurs absentes préservent les défauts OpenCode ; les champs invalides sont omis. Ces réglages couvrent tout le provider, dans options V1 et settings V2. Voir [modèles locaux lents](/guides/opencode/#slow-local-models-prefill-timeouts).

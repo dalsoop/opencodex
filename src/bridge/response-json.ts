@@ -1,3 +1,4 @@
+import { UNDECLARED_TOOL_CALL_MESSAGE } from "../lib/client-error-body";
 import { anthropicProgressItems } from "../responses/anthropic-progress";
 import type {
   AdapterEvent,
@@ -45,6 +46,7 @@ import {
 import { adapterFailureFromEvent, emptyChunks, joinChunks, responsesUsage, toolCallArgumentsUsable, uuid, webSearchAction, webSearchCellItemId } from "./internal";
 import type { OutputItem, StringChunks } from "./internal";
 import { bridgeToResponsesSSE } from "./sse";
+import { createMaxOutputCompletion, type MaxOutputCompletionOptions } from "./max-output-completion";
 
 /** Build a buffered Responses result within a caller-owned or temporary translator budget. */
 export function buildResponseJSON(
@@ -84,8 +86,10 @@ export function buildResponseJSON(
 function buildResponseJSONWithBudget(
   events: AdapterEvent[],
   modelId: string,
-  options?: {
+  options?: MaxOutputCompletionOptions & {
     hideThinkingSummary?: boolean;
+    /** Internal Chat delivery override for raw reasoning only; summaries keep their policy. */
+    chatRawReasoningVisible?: boolean;
     /** Provider policy: suppress raw content-channel reasoning, keep provider-authored summaries. */
     hideRawReasoning?: boolean;
     toolNsMap?: Map<string, { namespace: string; name: string; freeform?: true }>;
@@ -200,6 +204,7 @@ function buildResponseJSONWithBudget(
   // which is only true for a `done` without a stop reason. A buffered turn whose adapter simply
   // stopped emitting has no terminal at all, and must not be reported as a success.
   let sawTerminal = false;
+  const maxOutputCompletion = createMaxOutputCompletion(options);
   let batchCompaction = emptyChunks();
   let compactionEncryptedContent: string | undefined;
 
@@ -212,6 +217,7 @@ function buildResponseJSONWithBudget(
   let rawReasoningForNextToolCall = "";
   // Anthropic extended-thinking round-trip (batch): see bridgeToResponsesSSE counterpart.
   let batchSignature: string | undefined;
+  let batchSignatureAfter: string | undefined;
   let batchSignatureBytes = 0;
   let batchRedacted: string[] = [];
   let batchRedactedBytes = 0;
@@ -253,7 +259,7 @@ function buildResponseJSONWithBudget(
     const text = stripCitationMarkers(currentTextStr);
     const sourceBytes = pendingWebSources.reduce((sum, source) => sum + bytesOf(JSON.stringify(source)), 0);
     const annotations = pendingWebSources.map(s => ({
-      type: "url_citation", url: s.url, ...(s.title ? { title: s.title } : {}), start_index: 0, end_index: 0,
+      type: "url_citation", url: s.url, title: s.title || s.url, start_index: 0, end_index: 0,
     }));
     pendingWebSources = [];
     const item = {
@@ -271,12 +277,14 @@ function buildResponseJSONWithBudget(
     if (!summaryText && !batchSignature && batchRedacted.length === 0) return;
     const envelope: ReasoningEnvelope = {};
     if (batchSignature) envelope.sig = batchSignature;
+    if (batchSignatureAfter) envelope.aft = batchSignatureAfter;
     if (batchRedacted.length > 0) envelope.red = batchRedacted;
     const hidden = options?.hideThinkingSummary === true;
     if (hidden && summaryText && (envelope.sig || envelope.red)) envelope.txt = summaryText;
     const encrypted = envelope.sig || envelope.red || envelope.txt ? encodeReasoningEnvelope(envelope, budget) : undefined;
     const sourceBytes = currentSummaryReasoning.bytes + batchSignatureBytes + batchRedactedBytes;
     batchSignature = undefined;
+    batchSignatureAfter = undefined;
     batchSignatureBytes = 0;
     batchRedacted = [];
     batchRedactedBytes = 0;
@@ -297,7 +305,7 @@ function buildResponseJSONWithBudget(
     const rawText = joinChunks(currentRawReasoning);
     if (!rawText) return;
     rawReasoningForNextToolCall = rawText;
-    if (options?.hideThinkingSummary === true || options?.hideRawReasoning === true) {
+    if (!(options?.chatRawReasoningVisible ?? !options?.hideThinkingSummary) || options?.hideRawReasoning === true) {
       if (options?.omitHiddenReasoningEnvelope === true) {
         budget?.releaseRetained(currentRawReasoning.bytes, { kind: "reasoning" });
         currentRawReasoning = emptyChunks();
@@ -369,6 +377,7 @@ function buildResponseJSONWithBudget(
   };
 
   for (const e of events) {
+    maxOutputCompletion.observe(e);
     if (errorEvent) {
       // Match streaming: once the turn fails, later parallel calls must not become executable
       // completed output. Still release every retained event in order and preserve terminal usage.
@@ -434,12 +443,21 @@ function buildResponseJSONWithBudget(
           );
         }
         break;
-      case "thinking_signature":
+      case "thinking_signature": {
         // Like streaming, retain the latest signature update until the next semantic
         // event. Flushing every update would manufacture signature-only siblings.
         batchSignatureBytes = replaceBatchRetainedString(batchSignatureBytes, e.signature, "reasoning");
         batchSignature = e.signature;
+        const lastOutput = output[output.length - 1];
+        // Open outputs still flush after their reasoning, preserving legacy ordering.
+        // An explicitly late signature for an already-closed output needs a back-reference.
+        batchSignatureAfter = e.afterOutput && !currentText.bytes && !currentToolCallId
+          && !currentSummaryReasoning.bytes && lastOutput
+          && (["message", "function_call", "custom_tool_call"].includes(lastOutput.type)
+            || (lastOutput.type === "tool_search_call" && lastOutput.execution === "client"))
+          ? lastOutput.id : undefined;
         break;
+      }
       case "redacted_thinking":
         flushText("commentary");
         flushSummaryReasoning();
@@ -489,7 +507,7 @@ function buildResponseJSONWithBudget(
         ) {
           errorEvent = {
             type: "error",
-            message: `routed provider emitted undeclared client tool "${effectiveName}"; only request-declared tools may be called`,
+            message: UNDECLARED_TOOL_CALL_MESSAGE,
             status: 502,
             errorType: "upstream_error",
           };
@@ -514,6 +532,7 @@ function buildResponseJSONWithBudget(
         }
         break;
       case "tool_call_end":
+        if (e.incomplete) { flushToolCall("incomplete"); break; }
         if (!toolCallArgumentsUsable(currentToolCallArgs) && currentToolCallId) {
           // Mirror the streaming path: refuse to complete unusable arguments.
           const mapped = options?.toolNsMap?.get(currentToolCallName);
@@ -567,6 +586,7 @@ function buildResponseJSONWithBudget(
         break;
       case "incomplete":
         incompleteEvent = e;
+        usage = e.usage ?? usage;
         sawTerminal = true;
         endTurn = e.endTurn;
         if (e.providerState) options?.onProviderState?.(e.providerState);
@@ -637,9 +657,10 @@ function buildResponseJSONWithBudget(
   }
 
   const failure = errorEvent ? adapterFailureFromEvent(errorEvent) : undefined;
+  const gracefulComplete = maxOutputCompletion.completed && !errorEvent;
   const status = errorEvent
     ? "failed"
-    : incompleteEvent || stopReason === "max_tokens" || stopReason === "content_filter"
+    : !gracefulComplete && (incompleteEvent || stopReason === "max_tokens" || stopReason === "content_filter")
       ? "incomplete"
       : sawTerminal
         ? "completed"
@@ -659,13 +680,13 @@ function buildResponseJSONWithBudget(
     ...(failure && isCyberPolicyCode(failure.error.code)
       ? { retryable: false }
       : errorEvent?.retryable !== undefined ? { retryable: errorEvent.retryable } : {}),
-    ...(incompleteEvent ? {
+    ...(!gracefulComplete && incompleteEvent ? {
       incomplete_details: {
         reason: truncationReasonFor(incompleteEvent.reason) ?? incompleteEvent.reason,
         ...(incompleteEvent.message ? { message: incompleteEvent.message } : {}),
         ...(incompleteEvent.retryable !== undefined ? { retryable: incompleteEvent.retryable } : {}),
       },
-    } : stopReason === "max_tokens" ? {
+    } : !gracefulComplete && stopReason === "max_tokens" ? {
       incomplete_details: { reason: "max_output_tokens" },
     } : stopReason === "content_filter" ? {
       incomplete_details: { reason: "content_filter" },

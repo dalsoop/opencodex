@@ -10,10 +10,10 @@ description: 透過 SSH 連接 OpenCodex Home 電腦與 Child 電腦。
 - Home 可以使用 OpenSSH 金鑰登入 Child。
 - 對於由 Child 發起的連結，Child 必須能使用 OpenSSH 金鑰登入 Home（不支援密碼登入）。
 - Child 已安裝 OpenCodex 2.66.0 或更新版本（由 Child 發起的連結也要求 Home 符合）。
-- 兩台電腦執行 macOS 或 Linux。
+- 兩台電腦可執行 macOS、Linux 或 Windows x64。Windows 需要 OpenSSH Server 和 Windows PowerShell，不需要 Git Bash 或 curl。
 - 從 Home 新增 Child 的儀表板需在 Home 上開啟，或使用已配對的 Hub 工作階段。將目前電腦轉換為 Child 需要由操作者配對的儀表板工作階段；未經憑證簽發的本機工作階段不能提交這項路由變更。
 
-密碼 SSH 和 Windows 不在目前流程中。連結可以從任一端發起：依下文從 Home 發起，或依「將這台電腦連線為 Child」一節從 Child 發起。
+不支援密碼 SSH。可從 Home 或 Child 發起連結。Windows 透過相同固定主機金鑰的 OpenSSH 連線執行 PowerShell。
 
 ## 從 `#remote` 新增 Child
 
@@ -55,7 +55,7 @@ Host devbox
 
 - **Connected** 表示 SSH 通道已準備好，Child 可以使用 Home 連結。
 - **Reconnecting** 表示正在重試通道。重試期間請求可能暫時回傳帶有 `Retry-After` 的 `503`。在從自己的儀表板連線的 Child 上，請求會先最多等待 15 秒讓通道恢復。
-- **Failed** 表示連結需要處理。請檢查 SSH 驗證、已確認的主機金鑰、轉送或逾時原因。建立 SSH 通道的一方會在睡眠、故障或重新啟動後自動重試（Home 新增的 Child 由 Home 重試，從自己的儀表板連線的 Child 由 Child 重試）：逾時或轉送錯誤後大約每分鐘一次，驗證錯誤後每五分鐘一次。主機金鑰變更時不會重試。要立即重新連線，請在 Home 的儀表板中選擇 **Retry**，或在 Home 上執行 `ocx link reconnect --link-id <id>`。這只會重新啟動該連結的通道，不會重新啟動 OpenCodex。
+- **Failed** 表示連結需要處理。請檢查 SSH 驗證、已確認的主機金鑰、轉送或逾時原因。建立 SSH 通道的一方會在睡眠、故障或重新啟動後自動重試（Home 新增的 Child 由 Home 重試，從自己的儀表板連線的 Child 由 Child 重試）：逾時或轉送錯誤後先在一分鐘後重試，之後每次重試失敗等待時間加倍，最長五分鐘一次；驗證錯誤後每五分鐘一次。主機金鑰變更時不會重試。要立即重新連線，請在 Home 的儀表板中選擇 **Retry**，或在 Home 上執行 `ocx link reconnect --link-id <id>`。這只會重新啟動該連結的通道，不會重新啟動 OpenCodex。
 
 連結失敗時不會靜默切換到本機供應商。
 
@@ -85,9 +85,12 @@ ocx link issue --alias <alias> --tunnel-port <port> [--json]
 ocx link status [--json]
 ocx link revoke --link-id <id> [--json]
 ocx link reconnect --link-id <id> [--json]
+ocx link check (--link-id <id> | --all) [--no-wait] [--json]
 ```
 
 非互動式終端（非 TTY）必須提供 `--expect-fingerprint`。互動式終端中可省略此參數，但必須明確確認提供的指紋。
+
+在 Home 上，`ocx link check (--link-id <id> | --all)` 會讀取每個由 Home 新增的 Child 的已安裝版本、安裝類型和更新途徑：它透過連結的 SSH 連線在 Child 上執行 `ocx update --plan`（每台 Child 60 秒，同時最多三台），該命令只計算更新計畫，不會做任何修改。早於 2.97.0 的 Child 會顯示為 `owner-action`（`legacy-ocx`），其版本在 macOS 和 Linux 上透過再一次唯讀 SSH 呼叫取得，在 Windows 上則取自 Child 透過連結回報的版本。由 Child 發起的連結和 `ocx-child` Child 不經 SSH 直接回報。`ocx link status --json` 會為每一列加上 `child` 區塊（版本、版本差異、目錄是否最新、活動狀態、最近一次操作）。詳情與結束代碼請見 [Child install, catalog and activity](/guides/remote-link/#child-install-catalog-and-activity)（英文）。
 
 ## 相關指南
 

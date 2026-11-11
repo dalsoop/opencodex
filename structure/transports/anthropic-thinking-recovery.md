@@ -17,7 +17,8 @@ Recovery records only digests of the opaque blocks actually serialized by the ad
 `src/adapters/anthropic-rejection-memo.ts`. The request-local policy removes those blocks and
 leaves plaintext history and newly issued thinking intact. If bounded collection is unavailable, recovery is withheld rather than risking a byte-identical resend.
 A replacement HTTP refusal retains its status, safe error message/type and code; its body is
-not parsed as SSE. Cancellation, budget exhaustion and a second rejection cannot trigger another
+not parsed as SSE. A replacement constructed as a local auth/budget refusal retains process-local
+ownership in its projected event for the [Chat error contract](../data-planes/error-detail.md#client-error-bodies-chat). Its status, retry decision and Responses representation remain unchanged. Cancellation, budget exhaustion and a second rejection cannot trigger another
 signature recovery. Empty-completion retries in `src/server/responses/adapter-continuation.ts` share this guard and
 rebuild through their existing pacing/send owner. Ordinary continuations after output cannot
 recover signatures. Anthropic has no `runTurn` recovery.
@@ -29,9 +30,9 @@ the unsent repair uncharged. Recovery preserves the original thinking classifica
 
 Only a delivery-validated completed response with actual text/tool output and an observed
 successful terminal can memoize the rejection. Errors, incomplete/empty responses, missing
-terminals, cancellation and changed serving identity cannot memoize it. The existing thread and
-durable-serving-identity key and five-minute TTL in `src/responses/reasoning-replay-cache.ts` are
-unchanged. Selective memos retain at most 256 payload digests within the existing cache byte cap;
+terminals, cancellation and changed principal or serving identity cannot memoize it. The key in
+`src/responses/reasoning-replay-cache.ts` includes the principal, thread and durable serving identity;
+keyless callers have a separate namespace. The five-minute TTL and 256-payload digest cap remain;
 merged sets that cannot fit fall back to the existing blanket policy. `src/server/responses/core-replay.ts`
 binds a memo only for the current serving scope; a serving-identity change retains its independent
 blanket strip. No prefix hashes or local prefix validator participate in replay admission.

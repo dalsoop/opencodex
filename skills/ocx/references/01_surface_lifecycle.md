@@ -8,7 +8,7 @@
 Use these declarations to choose a task, then check its flags and authority before execution.
 Non-mutating probes may still contact providers, consume quota or refresh caches.
 
-Declared capabilities: 13.
+Declared capabilities: 14.
 
 ### `ocx codex-provider`
 
@@ -49,6 +49,7 @@ Drives no management route.
 | `--json` | boolean | Emit the status envelope as JSON. |
 
 - Reads /healthz plus local config; drives no management API route.
+- --json includes install: {method: bun|npm|pnpm|mise|source|standalone|unknown, evidence: {basis, mise?, error?}} from the updater's install detector.
 
 ### `ocx resolve`
 
@@ -76,6 +77,7 @@ Drives no management route.
 | Flag | Value | Meaning |
 |---|---|---|
 | `--json` | boolean | Emit the full capability table as JSON. |
+| `--contracts` | boolean | List supported versioned contracts. |
 | `--mutating-only` | boolean | Restrict output to capabilities that mutate state. |
 | `--route` | string | Show which capabilities drive a management route. |
 
@@ -83,9 +85,11 @@ Drives no management route.
 
 ### `ocx sync`
 
+Usage: `ocx sync [--expect-link <linkId> | --expect-hub-key <apiKeyId>] [--local-only] [--json] [--restart-codex] [--restart-app-server-only]`
+
 Synchronize client catalogs, including Aside profiles through the running server's mutation owner.
 
-State-changing: yes. JSON mode: `none`.
+State-changing: yes. JSON mode: `payload`.
 
 | Method | Route |
 |---|---|
@@ -93,11 +97,40 @@ State-changing: yes. JSON mode: `none`.
 
 | Flag | Value | Meaning |
 |---|---|---|
+| `--local-only` | boolean | Do not fan out the Home sync to linked Children. |
+| `--json` | boolean | Emit the sync fan-out result as JSON. |
 | `--restart-codex` | boolean | Restart the Codex app-servers and fully quit and relaunch the Codex desktop app after a catalog, cache, or changed configuration write, on macOS, Linux and Windows. |
 | `--restart-app-server-only` | boolean | Restart only the Codex app-servers and leave the desktop app running; wins over --restart-codex when both are given. |
 | `--restart-desktop-app` | boolean | Deprecated alias of --restart-codex. |
+| `--expect-link` | string | Sync only when this machine is a connected Remote Link Child of this link id; otherwise exit 5 with nothing changed. |
+| `--expect-hub-key` | string | Sync only when this machine is a hub client connected with this API key id; otherwise exit 5 with nothing changed. |
 
 - The Aside refresh uses the live server; other catalog synchronization also performs local work.
+- An update in flight or an unavailable update/sync mutex refuses without changes: update-in-flight, exit 7. Another sync reports sync-in-progress, exit 1.
+- A current Home catalog fans out to linked Children. Fan-out never requests a Codex app or app-server restart on a Child; use GOAT or ocx sync --restart-codex there. Applying changed Home settings may restart the Child's own OpenCodex client runtime.
+- After a successful Home sync, a connected Child skipped during fan-out, a failed or timed-out Child, or an unreadable link store yields partial exit 6. Skipped connected Children include an actionable hint; update an outdated ocx through its owning installer, with the Desktop tray as an option for Desktop installs. Intentional skips, including client-initiated links and --local-only, keep their existing exit behavior.
+- --expect-link/--expect-hub-key are checked under the lock that selects the sync path. A mismatch writes nothing, never falls back to local providers, exits 5, and ends stderr with {"phase":"child_link_mismatch"|"hub_client_mismatch","reason":...}; reasons are disconnected, invalid_state, disconnect_pending, pending_operation, hub_client, link_client, other_link and other_key. Usage errors exit 2.
+
+### `ocx stop`
+
+Usage: `ocx stop [--json]`
+
+Stop the proxy; preserve connected-client integrations, restore native Codex config for standalone owners.
+
+State-changing: yes. JSON mode: `envelope`.
+
+| Method | Route |
+|---|---|
+| GET | `/api/stop` |
+| POST | `/api/stop` |
+
+| Flag | Value | Meaning |
+|---|---|---|
+| `--json` | boolean | Emit one structured stop summary; human output moves to stderr. |
+
+- Connected clients verify runtime preservation support before stopping; unavailable or unsupported live targets refuse without stopping the service. Proven-stopped clients remain successful when the manager is inactive.
+- Siblings and connected clients preserve shared integrations. Standalone owners restore native Codex configuration and remove the managed Grok block.
+- JSON uses ocx-stop/1 and retains the same exit codes: 0, 1, 79 (history cleanup incomplete), 80 (teardown deferred).
 
 ### `ocx service install`
 
@@ -171,15 +204,20 @@ Drives no management route.
 
 ### `ocx service status`
 
-Usage: `ocx service status`
+Usage: `ocx service status [--json]`
 
 Inspect local service-manager status.
 
-State-changing: no. JSON mode: `none`.
+State-changing: no. JSON mode: `payload`.
 
 Drives no management route.
 
-- Local OS service manager: macOS launchd, Linux systemd, Windows Task Scheduler or WinSW. No management API or JSON mode.
+| Flag | Value | Meaning |
+|---|---|---|
+| `--json` | boolean | Emit the passive service status document as JSON. |
+
+- Local OS service manager: macOS launchd, Linux systemd, Windows Task Scheduler or WinSW. No management API.
+- --json is passive: schemaVersion 1 with installed, running, enabled, viable, stale, conflict, backend (launchd|systemd|schtasks|winsw|none), label, serving {probed, ok, port}, summary, logPath, ownershipLease and desktopLogin. It starts, stops, installs and repairs nothing.
 - Backend options apply only to install; other verbs use the installed backend.
 
 ### `ocx service uninstall`

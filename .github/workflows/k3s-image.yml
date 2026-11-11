@@ -1,0 +1,74 @@
+name: k3s hub image
+
+# Builds the hub image that gujoai k3s-infra runs (live/pve-k3s-svc/opencodex) from main of
+# dalsoop/opencodex and from the hub version tags (hub/<upstream version>-<n>), and pushes it to GHCR.
+# The image tag is <package.json version>-k3s-<first 12 characters of the commit>. One commit gets one
+# image: when that tag already exists (main was built before the version tag on the same commit was
+# pushed), the job reports the existing digest instead of building again. k3s-infra pins the image by
+# the digest printed in the job summary.
+
+on:
+  push:
+    branches: [main]
+    tags: ["hub/*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  # Keyed on the commit, so a main push and a tag push of the same commit run one after the other.
+  group: k3s-image-${{ github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  image:
+    if: github.repository == 'dalsoop/opencodex'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
+      - uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Tags
+        id: tags
+        run: |
+          version=$(jq -r .version package.json)
+          short=${GITHUB_SHA::12}
+          tag="ghcr.io/dalsoop/opencodex:${version}-k3s-${short}"
+          echo "tags=${tag}" >> "$GITHUB_OUTPUT"
+          if digest=$(docker buildx imagetools inspect "$tag" --format '{{json .Manifest}}' 2>/dev/null | jq -r .digest) && [ -n "$digest" ] && [ "$digest" != null ]; then
+            echo "existing=${digest}" >> "$GITHUB_OUTPUT"
+            echo "${tag} already exists (${digest}); not building again"
+          fi
+      - id: build
+        if: steps.tags.outputs.existing == ''
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          provenance: false
+          tags: ${{ steps.tags.outputs.tags }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/dalsoop/opencodex
+            org.opencontainers.image.revision=${{ github.sha }}
+      - name: Summary
+        env:
+          IMAGE: ${{ steps.tags.outputs.tags }}
+          DIGEST: ${{ steps.build.outputs.digest || steps.tags.outputs.existing }}
+          REF: ${{ github.ref }}
+        run: |
+          {
+            echo "ref: ${REF}"
+            echo "image: ${IMAGE}"
+            echo "digest: ${DIGEST}"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "image ${IMAGE}@${DIGEST}"

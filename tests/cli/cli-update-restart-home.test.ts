@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, spyOn, test } from "bun:test";
 import { mkdtempSync, mkdirSync, renameSync, rmSync, symlinkSync, writeFileSync, readFileSync, statSync, chmodSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -27,6 +27,22 @@ test("physical home identity detects same-path directory replacement", () => {
   const h = home(); const captured = readUpdateRestartHome(); checkHome(captured);
   renameSync(h.config, h.config + "-old"); mkdirSync(h.config);
   expect(() => checkHome(captured)).toThrow();
+});
+test("file ids beyond double precision still distinguish a replaced directory", () => {
+  // NTFS ids carry the MFT sequence in the high bits; a replacement directory often gets the
+  // neighbouring MFT index, and above 2^53 a double cannot tell the two ids apart.
+  home();
+  const original = 2n ** 58n + 4096n;
+  expect(Number(original + 1n)).toBe(Number(original));
+  let ino = original;
+  const deps = {
+    statDirectory: () => ({ dev: 7n, ino, isDirectory: () => true }),
+    supervision: { stat: () => ({ isFile: () => true, mode: 0o100755 }), platform: "darwin" as const, run: () => ({ status: 113, stdout: "", stderr: "" }) },
+  };
+  const captured = readUpdateRestartHome(deps);
+  expect(() => assertUpdateRestartHome(captured, Date.now() + 5000, deps)).not.toThrow();
+  ino = original + 1n;
+  expect(() => assertUpdateRestartHome(captured, Date.now() + 5000, deps)).toThrow("update_restart_home_changed");
 });
 test("canonical aliases identify the same directory", () => {
   const h = home(); const captured = readUpdateRestartHome();
@@ -82,6 +98,34 @@ test("production parent guard rejects client and hostname drift before stop", ()
   expect(() => assertUpdateRestartConfiguration("127.0.0.1")).toThrow();
   writeFileSync(config, JSON.stringify({ hostname: "127.0.0.1", runtimeRole: "client" }));
   expect(() => assertUpdateRestartConfiguration("127.0.0.1")).toThrow();
+});
+test("a default bind is compatible with a diagnosed omitted hostname", () => {
+  const h = home();
+  writeFileSync(join(h.config, "config.json"), "{}\n");
+  expect(() => assertUpdateRestartConfiguration("127.0.0.1")).not.toThrow();
+});
+test("the initial home snapshot detects same-bind diagnosed hostname changes", () => {
+  const h = home();
+  const config = join(h.config, "config.json");
+  writeFileSync(config, "{}\n");
+  const captured = readUpdateRestartHome();
+  checkHome(captured);
+  writeFileSync(config, JSON.stringify({ hostname: "127.0.0.1" }));
+  expect(() => checkHome(captured)).toThrow("update_restart_home_changed");
+});
+test("capturing restart eligibility leaves retired config untouched and emits no warning", () => {
+  const h = home();
+  const config = join(h.config, "config.json");
+  const bytes = JSON.stringify({ providers: { "opencode-free": { adapter: "openai-chat", apiKey: "synthetic-key" } } });
+  writeFileSync(config, bytes);
+  const before = readdirSync(h.config);
+  const warn = spyOn(console, "warn").mockImplementation(() => {});
+  try {
+    readUpdateRestartHome();
+    expect(readFileSync(config, "utf8")).toBe(bytes);
+    expect(readdirSync(h.config)).toEqual(before);
+    expect(warn).not.toHaveBeenCalled();
+  } finally { warn.mockRestore(); }
 });
 test("production child checker refuses client and competing runtime before acquisition", () => {
   for (const kind of ["client", "runtime", "malformed-runtime"] as const) {

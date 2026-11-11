@@ -405,7 +405,6 @@ for (const publisher of ["convergence", "retained"] as const) {
           apiKey: "fixture-key",
           allowPrivateNetwork: true,
           liveModels: true,
-          newModelPolicy: "on",
         },
       },
       disabledModels: ["gpt-5.5"],

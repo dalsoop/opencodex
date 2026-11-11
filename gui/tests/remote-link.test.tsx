@@ -1,8 +1,9 @@
-import { afterEach, beforeEach, expect, test } from "bun:test";
+import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
 import { Window } from "happy-dom";
 import type { Root } from "react-dom/client";
 import { act } from "react";
 import RemoteLink from "../src/pages/RemoteLink";
+import { RemoteLinkSheet } from "../src/pages/RemoteLinkSheet";
 import { boundLinkHint, CHILD_RESTART_NOTICE_MS, CHILD_RESTART_POLL_MS, CHILD_RESTART_SLOW_POLL_MS, LINK_ERROR_CODES, LINK_JOIN_DENIALS, LinkApiError, parseRemoteLinkStatus, readLinkJson, waitForChildRuntime, type RemoteLinkStatusWire } from "../src/remote-link-api";
 import { LanguageProvider } from "../src/i18n/provider";
 import { LOCALES } from "../src/i18n/shared";
@@ -24,9 +25,14 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
-  if (root) await act(async () => { root?.unmount(); });
-  root = null;
-  for (const key of globals) Object.defineProperty(globalThis, key, { configurable: true, value: previous[key] });
+  try {
+    if (root) await act(async () => { root?.unmount(); });
+  } finally {
+    root = null;
+    try { await win.happyDOM.close(); } finally {
+      for (const key of globals) Object.defineProperty(globalThis, key, { configurable: true, value: previous[key] });
+    }
+  }
 });
 
 function response(body: unknown, status = 200): Response { return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } }); }
@@ -54,7 +60,12 @@ async function mount(props: Partial<React.ComponentProps<typeof RemoteLink>> = {
 test("current translated link errors remain implemented across route and enrollment owners", async () => {
   const source = (await Promise.all(["link-routes", "link-enrollment", "link-route-state"].map(name =>
     Bun.file(`../src/server/management/${name}.ts`).text()))).join("\n");
-  const fromRoutes = [...source.matchAll(/(?:fail\(|remoteFailure\([^,\n]+,\s*)"([a-z_]+)"/g)].map(match => match[1]).filter((value, index, all) => all.indexOf(value) === index).sort();
+  // DELETE --purge forwards the code purgeDisconnectRemote chose, so its literals count as route codes.
+  const purgeSource = await Bun.file("../src/link/remote-plant.ts").text();
+  const fromRoutes = [
+    ...[...source.matchAll(/(?:fail\(|remoteFailure\([^,\n]+,\s*)"([a-z_]+)"/g)].map(match => match[1]),
+    ...[...purgeSource.matchAll(/\bcode: "([a-z_]+)"/g)].map(match => match[1]),
+  ].filter((value, index, all) => all.indexOf(value) === index).sort();
   // New phase errors use generic text. These two old-server translations remain compatible
   // although enrollment now reports child_relay_timeout and phase-specific failures instead.
   const legacyOnly = new Set(["admission_timeout", "link_apply_failed"]);
@@ -532,10 +543,10 @@ test("disconnect failure opens force confirmation and sends force body", async (
   const dialogs = [...host.querySelectorAll("dialog")];
   const confirm = dialogs.at(-1) as HTMLDialogElement;
   expect(confirm.textContent).toContain("Disconnect");
-  await act(async () => { (confirm.querySelector(".btn-danger") as HTMLButtonElement).click(); });
+  await act(async () => { (confirm.querySelector('[data-action="confirm"]') as HTMLButtonElement).click(); });
   await flush();
   expect(confirm.textContent).toContain("Remove here only");
-  await act(async () => { (confirm.querySelector(".btn-danger") as HTMLButtonElement).click(); });
+  await act(async () => { (confirm.querySelector('[data-action="confirm"]') as HTMLButtonElement).click(); });
   await flush();
   expect(calls.some(call => call.method === "DELETE" && call.body === JSON.stringify({ force: true }))).toBe(true);
 });
@@ -558,7 +569,9 @@ test("Retry on a failed Home link restarts its tunnel instead of only re-reading
   await act(async () => { retry.click(); });
   await settleUntil(() => host.querySelector(".remote-link-status[data-state='connecting']") !== null);
   expect(calls.filter(call => call.method === "POST").map(call => call.path)).toEqual(["/api/link/link-1/reconnect"]);
-  expect(calls.at(-1)).toEqual({ method: "GET", path: "/api/link/status" });
+  // The page also hosts the per-device fallback panel, whose own GET /api/fallback may land
+  // after the refresh; the link flow's last request is still the status re-read.
+  expect(calls.filter(call => call.path.startsWith("/api/link")).at(-1)).toEqual({ method: "GET", path: "/api/link/status" });
   expect(host.querySelector(".remote-link-status[data-state='connecting']")).not.toBeNull();
 });
 
@@ -568,11 +581,13 @@ test.each([false, true])("Retry stays disabled through the deferred refresh (POS
   const refreshed = new Promise<Response>(resolve => { release = resolve; });
   let posts = 0;
   let gets = 0;
-  globalThis.fetch = (async (_input, init) => {
+  globalThis.fetch = (async (input, init) => {
     if (init?.method === "POST") {
       posts += 1;
       return postFails ? response({ error: { code: "link_unavailable" } }, 503) : response({ linkId: "link-1" });
     }
+    // Count only the link status reads; the fallback panel's GET is a separate resource.
+    if (new URL(String(input)).pathname !== "/api/link/status") return response({ error: "not_found" }, 404);
     gets += 1;
     return gets === 1 ? response(failed) : refreshed;
   }) as typeof fetch;
@@ -656,7 +671,7 @@ test("probe failure stays visible and Retry probes the failed alias", async () =
   }) as typeof fetch;
   const host = await mount();
   await act(async () => { (host.querySelector('[role="switch"]') as HTMLButtonElement).click(); });
-  await act(async () => { (host.querySelector(".btn-primary") as HTMLButtonElement).click(); });
+  await act(async () => { (host.querySelector('[data-action="continue"]') as HTMLButtonElement).click(); });
   await flush();
   await act(async () => { (host.querySelector(".remote-link-candidate") as HTMLButtonElement).click(); });
   await act(async () => { [...host.querySelectorAll("button")].find(button => button.textContent?.includes("Test connection"))?.click(); });
@@ -688,7 +703,7 @@ test("apply failure stays retryable and Retry reapplies the confirmed alias", as
   }) as typeof fetch;
   const host = await mount();
   await act(async () => { (host.querySelector('[role="switch"]') as HTMLButtonElement).click(); });
-  await act(async () => { (host.querySelector(".btn-primary") as HTMLButtonElement).click(); });
+  await act(async () => { (host.querySelector('[data-action="continue"]') as HTMLButtonElement).click(); });
   await flush();
   await act(async () => { (host.querySelector(".remote-link-candidate") as HTMLButtonElement).click(); });
   await act(async () => { [...host.querySelectorAll("button")].find(button => button.textContent?.includes("Test connection"))?.click(); });
@@ -752,7 +767,7 @@ test("disconnect confirmation restores focus on cancel, Escape, and completion",
   const host = await mount();
   const disconnect = [...host.querySelectorAll("button")].find(button => button.textContent?.includes("Disconnect")) as HTMLButtonElement;
   await act(async () => { disconnect.click(); });
-  await act(async () => { (host.querySelector(".remote-link-confirm-dialog .btn-ghost") as HTMLButtonElement).click(); });
+  await act(async () => { (host.querySelector('.remote-link-confirm-dialog [data-action="cancel"]') as HTMLButtonElement).click(); });
   await new Promise(resolve => setTimeout(resolve, 0));
   expect(win.document.activeElement).toBe(disconnect);
   await act(async () => { disconnect.click(); });
@@ -760,7 +775,7 @@ test("disconnect confirmation restores focus on cancel, Escape, and completion",
   await new Promise(resolve => setTimeout(resolve, 0));
   expect(win.document.activeElement).toBe(disconnect);
   await act(async () => { disconnect.click(); });
-  await act(async () => { (host.querySelector(".remote-link-confirm-dialog .btn-danger") as HTMLButtonElement).click(); });
+  await act(async () => { (host.querySelector('.remote-link-confirm-dialog [data-action="confirm"]') as HTMLButtonElement).click(); });
   await flush();
   await new Promise(resolve => setTimeout(resolve, 0));
   expect(win.document.activeElement).toBe(disconnect);
@@ -788,7 +803,7 @@ test("cancelling a failed apply leaves no dead Retry behind", async () => {
   }) as typeof fetch;
   const host = await mount();
   await act(async () => { (host.querySelector('[role="switch"]') as HTMLButtonElement).click(); });
-  await act(async () => { (host.querySelector(".btn-primary") as HTMLButtonElement).click(); });
+  await act(async () => { (host.querySelector('[data-action="continue"]') as HTMLButtonElement).click(); });
   await flush();
   await act(async () => { (host.querySelector(".remote-link-candidate") as HTMLButtonElement).click(); });
   await act(async () => { [...host.querySelectorAll("button")].find(button => button.textContent?.includes("Test connection"))?.click(); });
@@ -849,7 +864,7 @@ test("cancelling candidates prevents a late response from appearing in a new att
   }) as typeof fetch;
   const host = await mount();
   await act(async () => { (host.querySelector('[role="switch"]') as HTMLButtonElement).click(); });
-  await act(async () => { (host.querySelector(".btn-primary") as HTMLButtonElement).click(); });
+  await act(async () => { (host.querySelector('[data-action="continue"]') as HTMLButtonElement).click(); });
   await act(async () => { [...host.querySelectorAll("button")].find(button => button.textContent === "Cancel")?.click(); });
   await act(async () => { [...host.querySelectorAll("button")].find(button => button.textContent?.includes("Add child"))?.click(); });
   await flush();
@@ -861,7 +876,7 @@ test("cancelling candidates prevents a late response from appearing in a new att
 
 async function openHomeSheet(host: HTMLElement): Promise<HTMLDialogElement> {
   await act(async () => { (host.querySelector('[role="switch"]') as HTMLButtonElement).click(); });
-  await act(async () => { (host.querySelector(".btn-primary") as HTMLButtonElement).click(); });
+  await act(async () => { (host.querySelector('[data-action="continue"]') as HTMLButtonElement).click(); });
   return host.querySelector(".remote-link-sheet") as HTMLDialogElement;
 }
 
@@ -878,6 +893,51 @@ async function enterAlias(sheet: HTMLElement, value: string): Promise<void> {
     input.dispatchEvent(new win.Event("input", { bubbles: true }));
   });
 }
+
+test.each(["close", "unmount"] as const)("pending sheet focus is cancelled on %s", async transition => {
+  type Timer = ReturnType<Window["setTimeout"]>;
+  const pending = new Map<Timer, () => void>();
+  const schedule = win.setTimeout.bind(win);
+  const cancel = win.clearTimeout.bind(win);
+  const timers = spyOn(win, "setTimeout").mockImplementation((callback, delay = 0, ...args) => {
+    if (delay !== 0) return schedule(callback, delay, ...args);
+    const timer = {} as Timer;
+    pending.set(timer, () => callback(...args));
+    return timer;
+  });
+  const cancellations = spyOn(win, "clearTimeout").mockImplementation(timer => {
+    if (!pending.delete(timer)) cancel(timer);
+  });
+  globalThis.fetch = (async input => response(String(input).endsWith("/candidates") ? { candidates: [] } : baseStatus)) as typeof fetch;
+  try {
+    const host = await mount();
+    const sheet = await openHomeSheet(host);
+    const trigger = [...host.querySelectorAll("button")].find(button => button.textContent?.includes("Add child"))!;
+    expect(pending.size).toBe(1);
+    // Prove the held callback is live and still gives an open sheet its initial focus.
+    for (const [timer, callback] of pending) { pending.delete(timer); callback(); }
+    expect(win.document.activeElement).toBe(sheet.querySelector("input, button"));
+    await act(async () => { sheet.dispatchEvent(new win.Event("cancel", { cancelable: true })); });
+    expect(win.document.activeElement).toBe(trigger);
+    await act(async () => { trigger.click(); });
+    expect(pending.size).toBe(1);
+    if (transition === "close") {
+      await act(async () => { sheet.dispatchEvent(new win.Event("cancel", { cancelable: true })); });
+    } else {
+      await act(async () => { root?.unmount(); });
+      root = null;
+    }
+    // Check cancellation before draining; executing an uncancelled timer cannot make this pass.
+    expect(pending.size).toBe(0);
+    for (const callback of pending.values()) callback();
+    if (transition === "close") expect(win.document.activeElement).toBe(trigger);
+  } finally {
+    if (root) await act(async () => { root?.unmount(); });
+    root = null;
+    timers.mockRestore();
+    cancellations.mockRestore();
+  }
+});
 
 test("discovery loading, empty setup and rescan retain keyboard-accessible manual entry", async () => {
   let complete!: (value: Response) => void;
@@ -970,7 +1030,7 @@ test("rescan after host confirmation preserves alias and requires fresh fingerpr
   expect([...sheet.querySelectorAll("button")].some(button => button.textContent === "Connect child")).toBe(false);
   expect(posts).toEqual([
     { path: "/api/link/probe", body: { alias: "manual-child" } },
-    { path: "/api/link/confirm-host", body: { alias: "manual-child", fingerprint: "SHA256:old" } },
+    { path: "/api/link/confirm-host", body: { alias: "manual-child", fingerprint: "SHA256:old", allowMissing: true } },
   ]);
 
   await act(async () => { sheetButton(sheet, "Test connection").click(); });
@@ -989,9 +1049,9 @@ test("rescan after host confirmation preserves alias and requires fresh fingerpr
   await flush();
   expect(posts).toEqual([
     { path: "/api/link/probe", body: { alias: "manual-child" } },
-    { path: "/api/link/confirm-host", body: { alias: "manual-child", fingerprint: "SHA256:old" } },
+    { path: "/api/link/confirm-host", body: { alias: "manual-child", fingerprint: "SHA256:old", allowMissing: true } },
     { path: "/api/link/probe", body: { alias: "manual-child" } },
-    { path: "/api/link/confirm-host", body: { alias: "manual-child", fingerprint: "SHA256:fresh" } },
+    { path: "/api/link/confirm-host", body: { alias: "manual-child", fingerprint: "SHA256:fresh", allowMissing: true } },
     { path: "/api/link/apply", body: { alias: "manual-child" } },
   ]);
   expect(sheet.open).toBe(false);
@@ -1054,7 +1114,7 @@ test("network discovery failure still permits a manual alias and explicit finger
   await act(async () => { (sheet.querySelector('[type="checkbox"]') as HTMLInputElement).click(); });
   await act(async () => { sheetButton(sheet, "Confirm host").click(); });
   await flush();
-  expect(posts[1]).toEqual({ path: "/api/link/confirm-host", body: { alias: "manual-child", fingerprint: "SHA256:manual" } });
+  expect(posts[1]).toEqual({ path: "/api/link/confirm-host", body: { alias: "manual-child", fingerprint: "SHA256:manual", allowMissing: true } });
   await act(async () => { sheetButton(sheet, "Connect child").click(); });
   await flush();
   expect(posts[2]).toEqual({ path: "/api/link/apply", body: { alias: "manual-child" } });
@@ -1074,4 +1134,150 @@ test("Find Home empty guidance names this computer rather than claiming it is Ho
   const sheet = host.querySelector(".remote-link-sheet")!;
   expect(sheet.textContent).toContain("this computer's ~/.ssh/config");
   expect(sheet.textContent).not.toContain("this Home's");
+});
+
+test("Ready-to-Plant, cached ephemeral, connected badges, conflict notices, and ephemeral disconnect --purge flows", async () => {
+  const calls: Array<{ method: string; path: string; body: unknown }> = [];
+  let mode: "bare" | "unplantable" | "ephemeral" | "conflict" = "bare";
+  let disconnectFailOnce = false;
+  const digestA = "a".repeat(64);
+  const digestB = "b".repeat(64);
+  let currentStatus: RemoteLinkStatusWire = {
+    ...baseStatus,
+    homeCodexSettingsDigest: digestA,
+    links: [
+      { id: "lnk_eph", alias: "devbox-eph", direction: "hub-initiated", state: "connected", since: "2026-11-07T00:00:00Z", reason: null, tunnelPort: 24500, childKind: "ephemeral", appliedCodexSettingsDigest: digestA },
+      { id: "lnk_full", alias: "devbox-full", direction: "hub-initiated", state: "connected", since: "2026-11-07T00:00:00Z", reason: null, tunnelPort: 24501, childKind: "full", appliedCodexSettingsDigest: digestB },
+    ],
+  };
+  globalThis.fetch = (async (input, init) => {
+    const path = new URL(String(input)).pathname;
+    const method = init?.method ?? "GET";
+    const parsedBody = init?.body ? JSON.parse(String(init.body)) : undefined;
+    if (method !== "GET") calls.push({ method, path, body: parsedBody });
+    if (path.endsWith("/candidates")) return response({ candidates: [{ alias: "barebox", source: "ssh_config" }] });
+    if (path.endsWith("/probe")) return response({ alias: "barebox", fingerprint: "SHA256:barefp", keyType: "ed25519" });
+    if (path.endsWith("/confirm-host")) {
+      if (mode === "bare") return response({ alias: "barebox", fingerprint: "SHA256:barefp", ocxVersion: null, runtimeKind: "missing", targetTriple: "linux-x64", plantable: true, binarySizeBytes: 952_000 });
+      if (mode === "unplantable") return response({ alias: "barebox", fingerprint: "SHA256:barefp", ocxVersion: null, runtimeKind: "missing", targetTriple: null, plantable: false, plantUnavailableReason: "unsupported_target" });
+      return response({ alias: "barebox", fingerprint: "SHA256:barefp", ocxVersion: "2.98.0", runtimeKind: "ephemeral", targetTriple: "linux-x64", plantable: false });
+    }
+    if (path.endsWith("/apply")) {
+      if (mode === "conflict") return response({ error: { code: "child_port_busy" } }, 409);
+      return response({ linkId: "lnk_planted" }, 202);
+    }
+    if (method === "DELETE" && path.endsWith("/lnk_eph")) {
+      if (disconnectFailOnce) {
+        disconnectFailOnce = false;
+        return response({ error: { code: "remote_disconnect_failed" } }, 502);
+      }
+      return response({ linkId: "lnk_eph" });
+    }
+    return response(currentStatus);
+  }) as typeof fetch;
+
+  const host = await mount();
+  // 1. Connected list badges: Lightweight + Home settings synced on devbox-eph, Full install + Sync needed on devbox-full
+  expect(host.textContent).toContain("Lightweight");
+  expect(host.textContent).toContain("Home settings synced");
+  expect(host.textContent).toContain("Full install");
+  expect(host.textContent).toContain("Sync needed");
+
+  // 2. Open Add Child sheet -> Ready-to-Plant card -> sends { alias: 'barebox', plant: true }
+  const addBtn = [...host.querySelectorAll("button")].find(b => b.textContent?.includes("Add child")) as HTMLButtonElement;
+  await act(async () => { addBtn.click(); });
+  await flush();
+  const sheet = host.querySelector(".remote-link-sheet") as HTMLDialogElement;
+  const candBtn = [...sheet.querySelectorAll(".remote-link-candidate")][0] as HTMLButtonElement;
+  await act(async () => { candBtn.click(); });
+  const probeBtn = [...sheet.querySelectorAll("button")].find(b => b.textContent?.includes("Test connection")) as HTMLButtonElement;
+  await act(async () => { probeBtn.click(); });
+  await flush();
+  await act(async () => { (sheet.querySelector('[type="checkbox"]') as HTMLInputElement).click(); });
+  const confirmBtn = [...sheet.querySelectorAll("button")].find(b => b.textContent?.includes("Confirm host")) as HTMLButtonElement;
+  await act(async () => { confirmBtn.click(); });
+  await flush();
+  expect(sheet.textContent).toContain("Ready to plant lightweight agent");
+  expect(sheet.textContent).toContain("linux-x64");
+  expect(sheet.textContent).toContain("~0.9 MB");
+  const plantBtn = [...sheet.querySelectorAll("button")].find(b => b.textContent?.includes("Plant lightweight agent & connect")) as HTMLButtonElement;
+  await act(async () => { plantBtn.click(); });
+  await flush();
+  expect(calls).toContainEqual({ method: "POST", path: "/api/link/apply", body: { alias: "barebox", plant: true } });
+
+  // 3. Cached ephemeral & child_port_busy conflict notice
+  mode = "conflict";
+  await act(async () => { addBtn.click(); });
+  await flush();
+  await act(async () => { ([...sheet.querySelectorAll(".remote-link-candidate")][0] as HTMLButtonElement).click(); });
+  await act(async () => { ([...sheet.querySelectorAll("button")].find(b => b.textContent?.includes("Test connection")) as HTMLButtonElement).click(); });
+  await flush();
+  await act(async () => { (sheet.querySelector('[type="checkbox"]') as HTMLInputElement).click(); });
+  await act(async () => { ([...sheet.querySelectorAll("button")].find(b => b.textContent?.includes("Confirm host")) as HTMLButtonElement).click(); });
+  await flush();
+  expect(sheet.textContent).toContain("Lightweight agent ready (ocx-child 2.98.0)");
+  await act(async () => { ([...sheet.querySelectorAll("button")].find(b => b.textContent?.includes("Connect child")) as HTMLButtonElement).click(); });
+  await flush();
+  expect(sheet.textContent).toContain("already in use by another process");
+  await act(async () => { ([...sheet.querySelectorAll("button")].find(b => b.textContent === "Cancel") as HTMLButtonElement).click(); });
+
+  // 4. Ephemeral Disconnect --purge checkbox -> sends { purge: true }, and on remote_disconnect_failed shows ocx-child detach force modal
+  const disconnectBtns = [...host.querySelectorAll(".remote-link-row button")];
+  await act(async () => { (disconnectBtns[0] as HTMLButtonElement).click(); });
+  await flush();
+  const confirmDialog = host.querySelector(".remote-link-confirm-dialog") as HTMLDialogElement;
+  expect(confirmDialog.textContent).toContain("0 background processes");
+  const purgeCheckbox = confirmDialog.querySelector('input[type="checkbox"]') as HTMLInputElement;
+  expect(purgeCheckbox.checked).toBe(false);
+  await act(async () => { purgeCheckbox.click(); });
+  const delBtn = [...confirmDialog.querySelectorAll("button")].find(b => b.textContent?.includes("Delete & disconnect")) as HTMLButtonElement;
+  disconnectFailOnce = true;
+  await act(async () => { delBtn.click(); });
+  await flush();
+  expect(calls).toContainEqual({ method: "DELETE", path: "/api/link/lnk_eph", body: { purge: true } });
+  // Force remove modal now shown with ocx-child detach guidance and exclusive { force: true } body
+  expect(confirmDialog.textContent).toContain("~/.cache/opencodex/bin/ocx-child detach");
+  const forceBtn = [...confirmDialog.querySelectorAll("button")].find(b => b.textContent?.includes("Remove here only")) as HTMLButtonElement;
+  await act(async () => { forceBtn.click(); });
+  await flush();
+  expect(calls.at(-1)).toEqual({ method: "DELETE", path: "/api/link/lnk_eph", body: { force: true } });
+});
+
+test("a refused --purge on a full install explains why instead of a generic failure", async () => {
+  globalThis.fetch = (async (_input, init) => {
+    if (init?.method === "DELETE") return response({ error: { code: "purge_unsupported", message: "full install" } }, 409);
+    return response({ ...baseStatus, links: [{ id: "lnk_stale", alias: "devbox-stale", direction: "hub-initiated", state: "connected", since: "2026-11-07T00:00:00Z", reason: null, tunnelPort: 24502, childKind: "ephemeral" }] });
+  }) as typeof fetch;
+  const host = await mount();
+  await act(async () => { ([...host.querySelectorAll(".remote-link-row button")][0] as HTMLButtonElement).click(); });
+  await flush();
+  const dialog = host.querySelector(".remote-link-confirm-dialog") as HTMLDialogElement;
+  await act(async () => { (dialog.querySelector('input[type="checkbox"]') as HTMLInputElement).click(); });
+  await act(async () => { ([...dialog.querySelectorAll("button")].find(b => b.textContent?.includes("Delete & disconnect")) as HTMLButtonElement).click(); });
+  await flush();
+  expect(dialog.textContent).toContain("full OpenCodex install");
+  expect(dialog.textContent).toContain("without deleting");
+});
+
+test("a bare host Home cannot plant names the verified build Home needs and where it looks", async () => {
+  const host = win.document.createElement("div");
+  win.document.body.append(host);
+  root = (await import("react-dom/client")).createRoot(host);
+  const noop = () => {};
+  const sheet = (reason: string | null) => (
+    <LanguageProvider>
+      <RemoteLinkSheet sheetRef={{ current: null }} role="home" standaloneRuntime childSelectable={false} discovery="ready" candidates={[]} alias="barebox" onAliasChange={noop}
+        probe={null} checkedFingerprint={false} onCheckedFingerprintChange={noop}
+        confirmation={{ alias: "barebox", fingerprint: "SHA256:barefp", ocxVersion: null, runtimeKind: "missing", targetTriple: "linux-arm64", plantable: false, binarySizeBytes: null, plantUnavailableReason: reason }}
+        busy={null} sheetOpen actionError={null} failedAction={null} onClose={noop} onRescan={noop} onProbe={noop} onConfirmHost={noop} onApplyLink={noop} onJoinLink={noop} onRetryFailedAction={noop} />
+    </LanguageProvider>
+  );
+  await act(async () => { root?.render(sheet("artifact_not_found")); });
+  const text = host.textContent ?? "";
+  expect(text).toContain("no verified ocx-child binary");
+  expect(text).toContain("OPENCODEX_CHILD_BIN_DIR");
+  expect(text).toContain("ocx-child-linux-arm64");
+  expect(text).toContain("SHA256SUMS");
+  await act(async () => { root?.render(sheet("unsupported_target")); });
+  expect(host.textContent ?? "").not.toContain("OPENCODEX_CHILD_BIN_DIR");
 });

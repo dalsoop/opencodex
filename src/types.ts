@@ -24,12 +24,15 @@ export {
 } from "./types/tools";
 
 export type { UpstreamHttpVersion, ReasoningSummaryDelivery, CodexAccountMode } from "./types/wire";
+export type { ThinkingDisplayPolicy } from "./types/wire";
 export type { AnthropicInstanceId } from "./providers/anthropic-instance-id";
 export { ANTHROPIC_INSTANCE_IDS, ANTHROPIC_PRIMARY_INSTANCE, ANTHROPIC_POOL2_INSTANCE, isAnthropicInstanceId } from "./providers/anthropic-instance-id";
 export type { AnthropicAccountPoolConfig, AnthropicModelRoute } from "./types/anthropic-account-pool";
+export type { OcxComboJevEffortMode } from "./types/combo-jev-effort-mode";
 export {
   UPSTREAM_HTTP_VERSION_VALUES,
   REASONING_SUMMARY_DELIVERY_VALUES,
+  THINKING_DISPLAY_VALUES,
   OPENAI_PROVIDER_TIER_VERSION,
   MODEL_ADAPTER_OVERRIDE_ALLOWED,
   captureWireAdapterHardPins,
@@ -51,6 +54,7 @@ export type {
   OcxToolResultMessage,
   OcxTextContent,
   OcxImageContent,
+  OcxAudioContent,
   OcxDocumentContent,
   OcxContentPart,
   OcxThinkingContent,
@@ -73,11 +77,13 @@ export type {
   OcxClaudeCodeConfig,
   OcxClaudeDesktopFamily,
   OcxClaudeDesktopAssignment,
+  OcxClaudeDesktopModelVisibility,
   OcxClaudeDesktopProfile,
   StorageCleanupPolicy,
   OcxCustomModel,
   OcxApiKeyEntry,
   OcxClientIntegrationsConfig,
+  OcxOpencodeClientExportConfig,
   OcxConfigRebaseProvenance,
   OcxHubConfig,
   OcxRemoteGuiConfig,
@@ -111,6 +117,7 @@ export type {
   OcxSearchConfig,
   OcxVisionSidecarConfig,
   OcxWebSearchSidecarConfig,
+  OcxClaudeCodeToolLoadingConfig,
 } from "./types/config";
 
 export type {
@@ -133,6 +140,7 @@ export type {
   TierDecision,
   OcxProviderConfig,
   ModelCapabilities,
+  ReasoningCapabilities,
 } from "./types/provider";
 
 export { PROVIDER_WEB_SEARCH_BRIDGE_BACKENDS } from "./types/provider";
@@ -142,3 +150,5 @@ export type {
   CodexAccountCredentials,
   CodexAccountCredentialRecord,
 } from "./types/accounts";
+
+export type { OcxTelemetryConfig, OcxTelemetryDecision } from "./types/telemetry";
