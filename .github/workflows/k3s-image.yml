@@ -1,12 +1,16 @@
 name: k3s hub image
 
-# Builds the hub image that gujoai k3s-infra runs (live/pve-k3s-svc/opencodex) from the
-# k3s/* deployment branches of dalsoop/opencodex, and pushes it to GHCR. k3s-infra pins the
-# image by the digest printed in the job summary.
+# Builds the hub image that gujoai k3s-infra runs (live/pve-k3s-svc/opencodex) from main of
+# dalsoop/opencodex and from the hub version tags (hub/<upstream version>-<n>), and pushes it to GHCR.
+# The image tag is <package.json version>-k3s-<first 12 characters of the commit>. One commit gets one
+# image: when that tag already exists (main was built before the version tag on the same commit was
+# pushed), the job reports the existing digest instead of building again. k3s-infra pins the image by
+# the digest printed in the job summary.
 
 on:
   push:
-    branches: ["k3s/**"]
+    branches: [main]
+    tags: ["hub/*"]
   workflow_dispatch:
 
 permissions:
@@ -14,7 +18,8 @@ permissions:
   packages: write
 
 concurrency:
-  group: k3s-image-${{ github.ref }}
+  # Keyed on the commit, so a main push and a tag push of the same commit run one after the other.
+  group: k3s-image-${{ github.sha }}
   cancel-in-progress: false
 
 jobs:
@@ -37,8 +42,14 @@ jobs:
         run: |
           version=$(jq -r .version package.json)
           short=${GITHUB_SHA::12}
-          echo "tags=ghcr.io/dalsoop/opencodex:${version}-k3s-${short}" >> "$GITHUB_OUTPUT"
+          tag="ghcr.io/dalsoop/opencodex:${version}-k3s-${short}"
+          echo "tags=${tag}" >> "$GITHUB_OUTPUT"
+          if digest=$(docker buildx imagetools inspect "$tag" --format '{{json .Manifest}}' 2>/dev/null | jq -r .digest) && [ -n "$digest" ] && [ "$digest" != null ]; then
+            echo "existing=${digest}" >> "$GITHUB_OUTPUT"
+            echo "${tag} already exists (${digest}); not building again"
+          fi
       - id: build
+        if: steps.tags.outputs.existing == ''
         uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
         with:
           context: .
@@ -50,9 +61,14 @@ jobs:
             org.opencontainers.image.source=https://github.com/dalsoop/opencodex
             org.opencontainers.image.revision=${{ github.sha }}
       - name: Summary
+        env:
+          IMAGE: ${{ steps.tags.outputs.tags }}
+          DIGEST: ${{ steps.build.outputs.digest || steps.tags.outputs.existing }}
+          REF: ${{ github.ref }}
         run: |
           {
-            echo "image: ${{ steps.tags.outputs.tags }}"
-            echo "digest: ${{ steps.build.outputs.digest }}"
+            echo "ref: ${REF}"
+            echo "image: ${IMAGE}"
+            echo "digest: ${DIGEST}"
           } >> "$GITHUB_STEP_SUMMARY"
-          echo "image ${{ steps.tags.outputs.tags }}@${{ steps.build.outputs.digest }}"
+          echo "image ${IMAGE}@${DIGEST}"
