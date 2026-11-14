@@ -4,9 +4,10 @@
  * `/v1/hub-state` promises a data key never sees quota or account identity, so this route takes
  * no data key. It takes one dedicated read key from OPENCODEX_HUB_ACCOUNTS_READ_KEY, and without
  * that variable the route does not exist. The response leaves here already reduced to the last
- * four id characters, masked addresses and an allow-list of quota fields.
+ * four id characters, masked addresses and an allow-list of quota fields. The openai native-main
+ * slot is left out only when the server checked and found no native Codex login on this hub.
  */
-import { classifyAccount, fetchRows, type AccountRow } from "../cli/account-api";
+import { classifyAccount, fetchCodexRows, fetchRows, type AccountRow } from "../cli/account-api";
 import type { OcxConfig } from "../types";
 import { configuredPort, isAllowedRequestOrigin, secretEquals, withCors, type RequestPolicyView } from "./auth-cors";
 
@@ -44,6 +45,14 @@ function projectQuota(quota: AccountRow["quota"]): Body | null {
   return out;
 }
 
+/**
+ * The native-main slot of a hub without a native Codex login. Only the server's checked absence
+ * counts; a slot whose credential exists (even one needing reauth) or is unknown stays listed.
+ */
+function isEmptyNativeMain(row: AccountRow): boolean {
+  return row.slotKind === "native-main" && row.id === "__main__" && row.hasCredential === false;
+}
+
 export function projectHubAccount(row: AccountRow): Body {
   return {
     id: String(row.id ?? "").slice(-4),
@@ -72,7 +81,7 @@ async function readAccounts(listRows: ListRows, now: number): Promise<Body> {
     const providers: Body = {};
     for (const provider of HUB_ACCOUNTS_PROVIDERS) {
       const rows = await listRows(provider);
-      providers[provider] = rows.filter(row => row.provider === provider).map(projectHubAccount);
+      providers[provider] = rows.filter(row => row.provider === provider && !isEmptyNativeMain(row)).map(projectHubAccount);
     }
     const body = { schemaVersion: 1, fetchedAt: new Date(now).toISOString(), providers };
     cache = { at: now, body };
@@ -98,12 +107,18 @@ export async function answerHubAccounts(
   }
 }
 
-/** The same local management read `ocx account list <provider> --quota --json` makes. */
+/**
+ * The same local management read `ocx account list <provider> --quota --json` makes; the Codex
+ * read also carries the native-main credential presence the server reported.
+ */
 function localApiRows(config: OcxConfig): ListRows {
   return async provider => {
     const classified = classifyAccount(config, provider);
     if ("error" in classified) return [];
-    const result = await fetchRows({ baseUrl: `http://127.0.0.1:${configuredPort()}` }, `http://127.0.0.1:${configuredPort()}`, provider, classified.type, {});
+    const base = `http://127.0.0.1:${configuredPort()}`;
+    const result = classified.type === "codex"
+      ? await fetchCodexRows({ baseUrl: base }, base, false, true, { mainCredential: true })
+      : await fetchRows({ baseUrl: base }, base, provider, classified.type, {});
     if (result.networkDown || result.errorJson) throw new Error("account list unavailable");
     return result.rows;
   };
