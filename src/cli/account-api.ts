@@ -66,6 +66,12 @@ export interface AccountRow {
    */
   paused?: boolean;
   pauseDetails?: import("../types/account-auto-pause").AccountPauseDetails;
+  /**
+   * Native-main Codex row only, and only when the reader asked for it (`mainCredential`):
+   * `false` is the server's checked finding that no native Codex login exists, `true` that one
+   * does. Absent means unknown; no credential value is carried.
+   */
+  hasCredential?: boolean;
 }
 
 export type ClassifyResult = { type: AccountType } | { error: string };
@@ -357,6 +363,18 @@ interface CodexAccountDto {
   quotaRefresh?: unknown;
   paused?: boolean;
   pauseDetails?: import("../types/account-auto-pause").AccountPauseDetails;
+  hasCredential?: unknown;
+  reauthReason?: unknown;
+}
+
+/**
+ * Native-main credential presence as the server observed it. The server sends
+ * `hasCredential: false` also when it could not check (a passive read, an unavailable claim),
+ * and names `missing_credential` only for an absence it checked, so `false` needs both.
+ */
+function mainCredentialPresence(a: CodexAccountDto): Pick<AccountRow, "hasCredential"> {
+  if (a.hasCredential === true) return { hasCredential: true };
+  return a.hasCredential === false && a.reauthReason === "missing_credential" ? { hasCredential: false } : {};
 }
 
 function projectQuota(quota: CodexQuotaDto | null | undefined): CodexQuotaDto | null {
@@ -379,7 +397,7 @@ export async function fetchCodexRows(
   baseUrl: string,
   forceRefresh = false,
   includeQuota = forceRefresh,
-  options: { refreshAction?: boolean } = {},
+  options: { refreshAction?: boolean; mainCredential?: boolean } = {},
 ): Promise<FamilyRows> {
   const refreshAction = options.refreshAction === true;
   const accountsPath = `/api/codex-auth/accounts${refreshAction ? "/refresh" : forceRefresh ? "?refresh=1" : ""}`;
@@ -437,6 +455,7 @@ export async function fetchCodexRows(
     paused: a.paused === true,
     // Unknown display details are dropped defensively; the pause state above is retained.
     pauseDetails: accountPauseDetailsSchema.safeParse(a.pauseDetails).data,
+    ...(options.mainCredential === true && a.id === "__main__" ? mainCredentialPresence(a) : {}),
     ...(includeQuota ? {
       quota: projectQuota(a.quota),
       quotaRefresh: projectCodexQuotaRefreshOutcome(a.quotaRefresh),
