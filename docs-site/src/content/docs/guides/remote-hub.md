@@ -2,6 +2,7 @@
 title: Remote Hub Deployment
 description: Run a one-port opencodex hub on Linux, macOS, or Docker with a loopback companion listener, a self-provisioned data token, ocx hub invite, a loopback-only management ingress, Tailscale Serve, and headless OAuth.
 ---
+<!-- This file is written in English only. -->
 
 For SSH machine links, see [Remote Link](/guides/remote-link/).
 
@@ -737,6 +738,28 @@ container recreation using an isolated Compose project with throwaway credential
 both named volumes and a synthetic catalog survive replacement. This check does not validate a
 real provider account, OAuth callback, custom mount migration, or every CPU architecture; perform
 the authenticated routed-response check above for your deployment.
+
+## Sizing a busy hub
+
+A hub serves every request from one `bun` process, so all proxying, streaming and management work shares
+one event loop. There is no worker or cluster setting that spreads request handling over more processes,
+and giving the process more CPU cores does not raise that ceiling. When the loop is busy, the hub still
+works but answers `/healthz` and `/readyz` late.
+
+For reference, one deployment measured about 1.2 to 1.6 cores for roughly 17 concurrent Claude Code
+streams relayed through the hub. Under that load a liveness probe with a 1 second timeout restarted a
+healthy hub, and a readiness timeout took the only replica out of the load balancer.
+
+When the hub runs under an orchestrator:
+
+- Give probes generous timeouts. Values that held under that load on Kubernetes: a `startupProbe` on
+  `/healthz` (period 5 s, timeout 5 s, 60 failures), liveness on `/healthz` (period 20 s, timeout 10 s,
+  6 failures), readiness on `/readyz` (period 15 s, timeout 15 s, 8 failures).
+- Request enough CPU that the loop is not throttled, and set no CPU limit. That deployment requests
+  2 CPU and 1 GiB of memory, with a 4 GiB memory limit.
+- Run one replica. The hub keeps its state (credentials, usage, configuration) in one writable
+  directory, so a second replica cannot share it; scale by moving clients to a second hub, not by
+  adding replicas.
 
 ## Rollback
 
